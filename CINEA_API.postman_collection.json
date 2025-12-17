@@ -1,0 +1,409 @@
+{
+  "info": {
+    "name": "CINEA API",
+    "description": "Sistema de Gestión de Cine - API RESTful",
+    "version": "1.0.0",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Cines",
+      "item": [
+        {
+          "name": "Listar cines",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/cinemas",
+              "host": ["{{base_url}}"],
+              "path": ["api", "cinemas"]
+            }
+          }
+        },
+        {
+          "name": "Obtener cine específico",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/cinemas/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "cinemas", "1"]
+            }
+          }
+        },
+        {
+          "name": "Crear cine",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Cine Nuevo\",\n  \"city\": \"Madrid\",\n  \"address\": \"Calle Principal 789\",\n  \"phone\": \"+34 91 123 4567\",\n  \"email\": \"info@cinenuevo.es\",\n  \"latitude\": 40.4168,\n  \"longitude\": -3.7038,\n  \"description\": \"Cine moderno\",\n  \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/cinemas",
+              "host": ["{{base_url}}"],
+              "path": ["api", "cinemas"]
+            }
+          }
+        },
+        {
+          "name": "Actualizar cine",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Cine Actualizado\",\n  \"description\": \"Actualización de descripción\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/cinemas/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "cinemas", "1"]
+            }
+          }
+        },
+        {
+          "name": "Eliminar cine",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/cinemas/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "cinemas", "1"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Películas",
+      "item": [
+        {
+          "name": "Listar películas",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/movies?page=1&per_page=15",
+              "host": ["{{base_url}}"],
+              "path": ["api", "movies"],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1"
+                },
+                {
+                  "key": "per_page",
+                  "value": "15"
+                },
+                {
+                  "key": "genre",
+                  "value": "Acción",
+                  "disabled": true
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Obtener película",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/movies/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "movies", "1"]
+            }
+          }
+        },
+        {
+          "name": "Crear película",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"Nueva Película\",\n  \"description\": \"Una película emocionante\",\n  \"genre\": \"Acción\",\n  \"duration\": 120,\n  \"rating\": \"PG-13\",\n  \"director\": \"Nombre Director\",\n  \"cast\": \"Actor 1, Actor 2\",\n  \"language\": \"es\",\n  \"poster_url\": \"https://example.com/poster.jpg\",\n  \"release_date\": \"2025-11-20\",\n  \"end_date\": \"2025-12-20\",\n  \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/movies",
+              "host": ["{{base_url}}"],
+              "path": ["api", "movies"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Salas",
+      "item": [
+        {
+          "name": "Listar salas",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/rooms",
+              "host": ["{{base_url}}"],
+              "path": ["api", "rooms"]
+            }
+          }
+        },
+        {
+          "name": "Obtener sala con asientos",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/rooms/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "rooms", "1"]
+            }
+          }
+        },
+        {
+          "name": "Crear sala",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cinema_id\": 1,\n  \"number\": \"5\",\n  \"name\": \"Sala 5\",\n  \"total_seats\": 300,\n  \"type\": \"3D\",\n  \"rows\": 15,\n  \"columns\": 20,\n  \"description\": \"Sala moderna con 3D\",\n  \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/rooms",
+              "host": ["{{base_url}}"],
+              "path": ["api", "rooms"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Funciones",
+      "item": [
+        {
+          "name": "Listar funciones",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/screenings?date=2025-11-15",
+              "host": ["{{base_url}}"],
+              "path": ["api", "screenings"],
+              "query": [
+                {
+                  "key": "movie_id",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "cinema_id",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "date",
+                  "value": "2025-11-15"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Obtener asientos disponibles",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/screenings/1/available-seats",
+              "host": ["{{base_url}}"],
+              "path": ["api", "screenings", "1", "available-seats"]
+            }
+          }
+        },
+        {
+          "name": "Crear función",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"movie_id\": 1,\n  \"room_id\": 1,\n  \"start_time\": \"2025-11-20 19:30:00\",\n  \"end_time\": \"2025-11-20 21:36:00\",\n  \"price\": 15.50,\n  \"format\": \"3D\",\n  \"is_active\": true\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/screenings",
+              "host": ["{{base_url}}"],
+              "path": ["api", "screenings"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Entradas",
+      "item": [
+        {
+          "name": "Listar mis entradas",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/tickets",
+              "host": ["{{base_url}}"],
+              "path": ["api", "tickets"]
+            }
+          }
+        },
+        {
+          "name": "Obtener entrada específica",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/tickets/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "tickets", "1"]
+            }
+          }
+        },
+        {
+          "name": "Comprar entradas",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"screening_id\": 1,\n  \"seat_ids\": [1, 2, 3]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/api/tickets",
+              "host": ["{{base_url}}"],
+              "path": ["api", "tickets"]
+            }
+          }
+        },
+        {
+          "name": "Cancelar entrada",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/tickets/1",
+              "host": ["{{base_url}}"],
+              "path": ["api", "tickets", "1"]
+            }
+          }
+        },
+        {
+          "name": "Mis entradas para una función",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/screenings/1/my-tickets",
+              "host": ["{{base_url}}"],
+              "path": ["api", "screenings", "1", "my-tickets"]
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    }
+  ]
+}
