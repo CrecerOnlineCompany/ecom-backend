@@ -26,6 +26,7 @@ return new class extends Migration
             $table->date('release_date');
             $table->date('end_date')->nullable();
             $table->boolean('is_active')->default(true);
+            $table->string('poster_image')->nullable()->comment('Nombre del archivo de imagen del póster');
             $table->timestamps();
         });
     }

@@ -87,4 +87,60 @@ return [
     'current_page'          => 'Página actual',
     'selected_rows'         => 'Filas seleccionadas',
     'menu_titles'           => [],
+
+    // Campos específicos de CINEA
+    'id'                    => 'ID',
+    'email'                 => 'Email',
+    'status'                => 'Estado',
+    'action'                => 'Acción',
+
+    // Cines
+    'cinema'                => 'Cine',
+    'city'                  => 'Ciudad',
+    'address'               => 'Dirección',
+    'phone'                 => 'Teléfono',
+    'latitude'              => 'Latitud',
+    'longitude'             => 'Longitud',
+
+    // Películas
+    'movie'                 => 'Película',
+    'genre'                 => 'Género',
+    'duration'              => 'Duración (min)',
+    'rating'                => 'Clasificación',
+    'rating_help'           => 'Ejemplos: G, PG, PG-13, R, NC-17',
+    'director'              => 'Director',
+    'cast'                  => 'Reparto',
+    'language'              => 'Idioma',
+    'spanish'               => 'Español',
+    'english'               => 'Inglés',
+    'french'                => 'Francés',
+    'german'                => 'Alemán',
+    'poster_url'            => 'URL del póster',
+    'trailer_url'           => 'URL del tráiler',
+    'release_date'          => 'Fecha de estreno',
+    'end_date'              => 'Fecha de fin',
+
+    // Salas
+    'room'                  => 'Sala',
+    'room_number'           => 'Número de sala',
+    'type'                  => 'Tipo',
+    'total_seats'           => 'Total de asientos',
+    'rows'                  => 'Filas',
+    'columns'               => 'Columnas',
+
+    // Funciones/Screenings
+    'start_time'            => 'Hora de inicio',
+    'end_time'              => 'Hora de fin',
+    'price'                 => 'Precio',
+    'available_seats'       => 'Asientos disponibles',
+    'format'                => 'Formato',
+
+    // Entradas/Tickets
+    'ticket_number'         => 'Número de entrada',
+    'user'                  => 'Usuario',
+    'seat'                  => 'Asiento',
+    'ticket_status'         => 'Estado de entrada',
+    'qr_code'               => 'Código QR',
+    'used_at'               => 'Usado en',
 ];
+

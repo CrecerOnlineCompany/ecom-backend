@@ -123,7 +123,13 @@ class AdminMenuSeeder extends Seeder
             'parent_id' => $ticketMenu->id,
             'order' => 1,
         ]);
-
+$menuModel::create([
+            'title' => 'Proveedores de Pago',
+            'icon' => 'fa-th-list',
+            'uri' => 'payment-providers',
+            'parent_id' => $ticketMenu->id,
+            'order' => 2,
+        ]);
         $this->command->info('Admin menus seeded successfully.');
     }
 }

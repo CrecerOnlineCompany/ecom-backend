@@ -25,6 +25,12 @@ class MovieController extends Controller
         }
 
         $movies = $query->orderBy('release_date', 'desc')->paginate(15);
+        
+        // Agregar URL de imagen a cada película
+        $movies->getCollection()->transform(function ($movie) {
+            return $this->transformMovie($movie);
+        });
+        
         return response()->json($movies);
     }
 
@@ -59,7 +65,7 @@ class MovieController extends Controller
     public function show(Movie $movie): JsonResponse
     {
         $movie->load(['screenings.room.cinema']);
-        return response()->json($movie);
+        return response()->json($this->transformMovie($movie));
     }
 
     /**
@@ -94,5 +100,25 @@ class MovieController extends Controller
     {
         $movie->delete();
         return response()->json(['message' => 'Movie deleted successfully']);
+    }
+
+    /**
+     * Transform movie data to include poster image URL.
+     */
+    private function transformMovie(Movie $movie): array
+    {
+        $data = $movie->toArray();
+        
+        // Agregar URL de imagen si existe
+        if ($movie->poster_image) {
+            $data['poster_image_url'] = url('/images/movies/' . $movie->poster_image);
+        } else {
+            $data['poster_image_url'] = null;
+        }
+        
+        // Remover el campo poster_image para devolver solo la URL
+        unset($data['poster_image']);
+        
+        return $data;
     }
 }

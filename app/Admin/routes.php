@@ -24,9 +24,22 @@ Route::group([
 
     // Screenings
     $router->resource('screenings', 'ScreeningController');
+    $router->get('screenings/export/excel', 'ScreeningController@exportExcel')->name('screenings.export.excel');
+    $router->get('screenings/export/csv', 'ScreeningController@exportCsv')->name('screenings.export.csv');
+    $router->get('screenings/import/form', 'ScreeningController@showImportForm')->name('screenings.import.form');
+    $router->post('screenings/import', 'ScreeningController@importFile')->name('screenings.import');
 
-    // Tickets (read-only)
-    $router->get('tickets', 'TicketController@index')->name('tickets.index');
-    $router->get('tickets/{id}', 'TicketController@show')->name('tickets.show');
+    // Tickets (resource completo - CRUD)
+    $router->resource('tickets', 'TicketController');
+    
+    // Rutas personalizadas para editar details desde tickets
+    $router->put('tickets/{ticket}/details/{detail}', 'TicketController@updateDetail')->name('tickets.details.update');
+    $router->delete('tickets/{ticket}/details/{detail}', 'TicketController@cancelDetail')->name('tickets.details.cancel');
+    
+    // Ticket Details (anidado bajo Tickets)
+    $router->resource('ticket-details', 'TicketDetailController');
+
+    // Payment Providers
+    $router->resource('payment-providers', 'PaymentProviderController');
 
 });

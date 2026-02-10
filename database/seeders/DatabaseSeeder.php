@@ -8,6 +8,7 @@ use App\Models\Room;
 use App\Models\Movie;
 use App\Models\Screening;
 use App\Models\User;
+use Illuminate\Support\Str;
 use Illuminate\Database\Seeder;
 
 class DatabaseSeeder extends Seeder
@@ -19,6 +20,7 @@ class DatabaseSeeder extends Seeder
     {
         // Ejecutar seeder de menús admin
         $this->call(AdminMenuSeeder::class);
+        $this->call(PaymentProviderSeeder::class);
 
         // Crear usuarios de prueba
         User::factory()->create([
@@ -70,8 +72,8 @@ class DatabaseSeeder extends Seeder
 
         // Crear salas
         for ($i = 1; $i <= 3; $i++) {
-            $rows = 15;
-            $columns = 20;
+            $rows = 6;
+            $columns = 5;
             $room = Room::create([
                 'cinema_id' => $cinema1->id,
                 'number' => (string)$i,
@@ -88,8 +90,8 @@ class DatabaseSeeder extends Seeder
         }
 
         for ($i = 1; $i <= 2; $i++) {
-            $rows = 12;
-            $columns = 18;
+            $rows = 7;
+            $columns = 6;
             $room = Room::create([
                 'cinema_id' => $cinema2->id,
                 'number' => (string)$i,
@@ -105,8 +107,8 @@ class DatabaseSeeder extends Seeder
         }
 
         for ($i = 1; $i <= 2; $i++) {
-            $rows = 16;
-            $columns = 22;
+            $rows = 4;
+            $columns = 5;
             $room = Room::create([
                 'cinema_id' => $cinema3->id,
                 'number' => (string)$i,
@@ -210,13 +212,99 @@ class DatabaseSeeder extends Seeder
                                 'room_id' => $room->id,
                                 'start_time' => $startTime,
                                 'end_time' => $endTime,
-                                'price' => rand(12, 18),
+                                'price' => 8.00,
                                 'available_seats' => $room->total_seats,
                                 'format' => $room->type,
                                 'is_active' => true,
                             ]);
                         }
                     }
+                }
+            }
+        }
+
+        // Crear tickets de prueba con ticket_details
+        $this->createSampleTickets();
+    }
+
+    private function createSampleTickets(): void
+    {
+        $users = User::all();
+        $screenings = Screening::with('movie', 'room.cinema')->take(5)->get();
+
+        foreach ($screenings as $screening) {
+            // Obtener todos los asientos de la sala
+            $allSeats = $screening->room->seats()->get();
+            $usedSeats = [];
+
+            // Crear 2-3 tickets por función
+            for ($i = 0; $i < rand(2, 3); $i++) {
+                $user = $users->random();
+                $numSeats = rand(1, 4); // 1-4 asientos por ticket
+                
+                // Obtener asientos que no hayamos usado en esta función
+                $availableSeats = $allSeats->filter(function ($seat) use ($usedSeats) {
+                    return !in_array($seat->id, $usedSeats);
+                })->take($numSeats);
+
+                if ($availableSeats->isEmpty()) continue;
+
+                $totalPrice = 0;
+                $details = [];
+
+                // Calcular precio total y preparar detalles
+                foreach ($availableSeats as $seat) {
+                    $seatPrice = $screening->price * (1 + $seat->price_modifier);
+                    $totalPrice += $seatPrice;
+                    $usedSeats[] = $seat->id; // Marcar como usada
+                    
+                    $details[] = [
+                        'seat_id' => $seat->id,
+                        'seat_code' => $seat->seat_code,
+                        'row_number' => $seat->row_number,
+                        'seat_number' => $seat->seat_number,
+                        'price' => $seatPrice,
+                    ];
+                }
+
+                // Crear ticket con datos desnormalizados
+                $status = ['confirmed', 'pending_payment'][rand(0, 1)];
+                $ticket = \App\Models\Ticket::create([
+                    'screening_id' => $screening->id,
+                    'user_id' => $user->id,
+                    'seat_id' => null, // Ya no usamos esto, tenemos ticket_details
+                    'ticket_number' => 'TKT-' . date('Ymd') . '-' . strtoupper(Str::random(8)),
+                    'price' => $totalPrice,
+                    'status' => $status,
+                    'payment_method' => ['Tarjeta de Crédito', 'MercadoPago', 'PayPal'][rand(0, 2)],
+                    'original_price' => $totalPrice,
+                    'discount_amount' => 0,
+                    'purchased_at' => now()->subDays(rand(0, 30)),
+                    // Datos desnormalizados
+                    'customer_name' => $user->name,
+                    'customer_email' => $user->email,
+                    'customer_phone' => $user->phone ?? '+34 ' . rand(600000000, 699999999),
+                    'movie_title' => $screening->movie->title,
+                    'room_name' => $screening->room->name,
+                    'cinema_name' => $screening->room->cinema->name,
+                    'screening_start_time' => $screening->start_time,
+                    'screening_format' => $screening->format,
+                ]);
+
+                // Crear ticket_details para cada asiento
+                foreach ($details as $detail) {
+                    \App\Models\TicketDetail::create([
+                        'ticket_id' => $ticket->id,
+                        'screening_id' => $screening->id,
+                        'seat_id' => $detail['seat_id'],
+                        'seat_code' => $detail['seat_code'],
+                        'row_number' => $detail['row_number'],
+                        'seat_number' => $detail['seat_number'],
+                        'price' => $detail['price'],
+                        'status' => $status === 'confirmed' ? 'confirmed' : 'pending',
+                        'qr_code' => hash('sha256', $ticket->ticket_number . '-' . $detail['seat_code']),
+                        'used_at' => $status === 'confirmed' && rand(0, 1) ? now()->subDays(rand(0, 5)) : null,
+                    ]);
                 }
             }
         }
@@ -228,7 +316,7 @@ class DatabaseSeeder extends Seeder
         $columns = $room->columns;
 
         for ($row = 1; $row <= $rows; $row++) {
-            $rowLetter = chr(64 + $row);
+            $rowLetter = chr(64 + $row); // A, B, C, etc.
 
             for ($col = 1; $col <= $columns; $col++) {
                 $seatCode = $rowLetter . $col;

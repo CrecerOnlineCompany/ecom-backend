@@ -97,10 +97,18 @@ class ScreeningController extends Controller
 
     /**
      * Get available seats for a screening
+     * Excluye: tickets confirmados + tickets pending_payment (en proceso)
      */
     public function availableSeats(Screening $screening): JsonResponse
     {
-        $bookedSeats = $screening->tickets()->pluck('seat_id')->toArray();
+        // Obtener asientos que están:
+        // - Confirmados (ya pagados)
+        // - En proceso de pago (pending_payment, processing)
+        $bookedSeats = $screening->tickets()
+            ->whereIn('status', ['confirmed', 'pending_payment', 'processing'])
+            ->pluck('seat_id')
+            ->toArray();
+        
         $availableSeats = $screening->room->seats()
             ->whereNotIn('id', $bookedSeats)
             ->where('is_active', true)
@@ -109,6 +117,8 @@ class ScreeningController extends Controller
 
         return response()->json([
             'screening_id' => $screening->id,
+            'total_seats' => $screening->room->total_seats,
+            'booked_seats_count' => count($bookedSeats),
             'available_seats_count' => $availableSeats->count(),
             'seats' => $availableSeats,
         ]);

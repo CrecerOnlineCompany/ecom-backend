@@ -22,14 +22,16 @@ class CinemaController extends AdminController
     {
         $grid = new Grid(new Cinema());
 
-        $grid->column('id', __('ID'))->sortable();
-        $grid->column('name', __('Nombre'))->sortable();
-        $grid->column('city', __('Ciudad'))->sortable();
-        $grid->column('address', __('Dirección'));
-        $grid->column('phone', __('Teléfono'));
-        $grid->column('email', __('Email'));
-        $grid->column('is_active', __('Activo'))->bool()->sortable();
-        $grid->column('created_at', __('Creado'))->sortable();
+        $grid->column('id', __('admin.id'))->sortable();
+        $grid->column('name', __('admin.name'))->sortable();
+        $grid->column('city', __('admin.city'))->sortable();
+        $grid->column('address', __('admin.address'));
+        $grid->column('phone', __('admin.phone'));
+        $grid->column('email', __('admin.email'));
+        $grid->column('is_active', __('admin.status'))->bool()->sortable();
+        $grid->column('created_at', __('admin.created_at'))->sortable()->display(function ($value) {
+            return \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s');
+        });
 
         return $grid;
     }
@@ -41,18 +43,18 @@ class CinemaController extends AdminController
     {
         $show = new Show(Cinema::findOrFail($id));
 
-        $show->field('id', __('ID'));
-        $show->field('name', __('Nombre'));
-        $show->field('city', __('Ciudad'));
-        $show->field('address', __('Dirección'));
-        $show->field('phone', __('Teléfono'));
-        $show->field('email', __('Email'));
-        $show->field('latitude', __('Latitud'));
-        $show->field('longitude', __('Longitud'));
-        $show->field('description', __('Descripción'));
-        $show->field('is_active', __('Activo'))->bool();
-        $show->field('created_at', __('Creado'));
-        $show->field('updated_at', __('Actualizado'));
+        $show->field('id', __('admin.id'));
+        $show->field('name', __('admin.name'));
+        $show->field('city', __('admin.city'));
+        $show->field('address', __('admin.address'));
+        $show->field('phone', __('admin.phone'));
+        $show->field('email', __('admin.email'));
+        $show->field('latitude', __('admin.latitude'));
+        $show->field('longitude', __('admin.longitude'));
+        $show->field('description', __('admin.description'));
+        $show->field('is_active', __('admin.status'))->bool();
+        $show->field('created_at', __('admin.created_at'));
+        $show->field('updated_at', __('admin.updated_at'));
 
         return $show;
     }
@@ -64,15 +66,21 @@ class CinemaController extends AdminController
     {
         $form = new Form(new Cinema());
 
-        $form->text('name', __('Nombre'))->rules('required|unique:cinemas,name');
-        $form->text('city', __('Ciudad'))->rules('required');
-        $form->text('address', __('Dirección'))->rules('required');
-        $form->text('phone', __('Teléfono'))->rules('nullable|string');
-        $form->email('email', __('Email'))->rules('nullable|email');
-        $form->decimal('latitude', __('Latitud'))->rules('nullable|numeric');
-        $form->decimal('longitude', __('Longitud'))->rules('nullable|numeric');
-        $form->textarea('description', __('Descripción'))->rules('nullable|string');
-        $form->switch('is_active', __('Activo'))->default(1);
+        $cinemaId = request()->route('cinema');
+        $uniqueRule = 'required|unique:cinemas,name';
+        if ($cinemaId) {
+            $uniqueRule .= ',' . $cinemaId;
+        }
+
+        $form->text('name', __('admin.name'))->rules($uniqueRule);
+        $form->text('city', __('admin.city'))->rules('required');
+        $form->text('address', __('admin.address'))->rules('required');
+        $form->text('phone', __('admin.phone'))->rules('nullable|string');
+        $form->email('email', __('admin.email'))->rules('nullable|email');
+        $form->decimal('latitude', __('admin.latitude'))->rules('nullable|numeric');
+        $form->decimal('longitude', __('admin.longitude'))->rules('nullable|numeric');
+        $form->textarea('description', __('admin.description'))->rules('nullable|string');
+        $form->switch('is_active', __('admin.status'))->default(1);
 
         return $form;
     }
