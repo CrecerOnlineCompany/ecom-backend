@@ -67,6 +67,92 @@ class PaymentProviderManager
     }
 
     /**
+     * Iniciar pago para una Order (Order-first flow)
+     * 
+     * En el flujo order-first:
+     * - La orden ya está creada con asientos reservados
+     * - Se crea una PaymentProviderTicket vinculada a la orden (sin ticket individual)
+     * - El webhook  creará los tickets cuando confirme el pago
+     * 
+     * @param \App\Models\Order $order
+     * @param int $providerId
+     * @param array $additionalData Ej: ['seat_ids' => [...], 'seat_count' => int, 'total_price' => decimal]
+     * @return array Resultado con success, redirect_url, transaction_id, etc
+     */
+    public function initiateOrderPayment(\App\Models\Order $order, int $providerId, array $additionalData = []): array
+    {
+        $provider = PaymentProvider::findOrFail($providerId);
+        
+        if (!$provider->is_active) {
+            throw new \Exception("Payment provider is inactive");
+        }
+
+        // Crear PaymentProviderTicket vinculada a la orden (sin ticket individual pre-existente)
+        $paymentTicketData = [
+            'order_id' => $order->id,
+            'payment_provider_id' => $provider->id,
+            'status' => 'pending',
+            // No ticket_id en este flujo order-first
+        ];
+        
+        $paymentTicket = PaymentProviderTicket::create($paymentTicketData);
+        
+        Log::info('Order payment initiated', [
+            'order_id' => $order->id,
+            'order_number' => $order->order_number,
+            'payment_ticket_id' => $paymentTicket->id,
+            'provider_id' => $providerId,
+        ]);
+
+        try {
+            // Obtener handler y procesar pago
+            $handler = $this->getHandler($provider);
+            
+            // Pasar información de la orden en place of ticket
+            $enrichedData = array_merge($additionalData, [
+                'order_id' => $order->id,
+                'order_number' => $order->order_number,
+                'customer_email' => $order->customer_email,
+                'customer_name' => $order->customer_name,
+                'total_amount' => $order->total_amount,
+                'total_price' => $order->total_amount,
+            ]);
+            
+            // NOTA: Algunos handlers pueden esperar un Ticket. En ese caso,
+            // se puede crear un "dummy ticket" temporal o adaptar el handler.
+            // Por ahora usamos un approach directo pasando datos.
+            $result = $handler->processOrderPayment($paymentTicket, $enrichedData);
+
+            if (!($result['success'] ?? false)) {
+                Log::warning('Order payment initiation failed', [
+                    'order_id' => $order->id,
+                    'result' => $result,
+                ]);
+                $paymentTicket->delete();
+                return $result;
+            }
+
+            Log::info('Order payment initiated successfully', [
+                'order_id' => $order->id,
+                'payment_ticket_id' => $paymentTicket->id,
+                'transaction_id' => $result['transaction_id'] ?? 'N/A',
+            ]);
+
+            return array_merge($result, [
+                'payment_ticket_id' => $paymentTicket->id,
+            ]);
+
+        } catch (\Exception $e) {
+            $paymentTicket->delete();
+            Log::error('Error initiating order payment', [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
+            throw $e;
+        }
+    }
+
+    /**
      * Iniciar pago
      */
     public function initiatePayment(Ticket $ticket, int $providerId, array $additionalData = []): array

@@ -148,14 +148,17 @@ class PaymentController extends Controller
                 $screening = Screening::find($validated['screening_id']);
                 $useSeatInventory = (bool)config('features.seat_inventory', false);
                 
-                $tickets = [];
-                $totalPrice = 0;
                 $orderId = null;
                 $orderNumber = null;
+                $totalPrice = 0;
+                $paymentTicketId = null;
 
                 // ====================================================================
                 // Order-first path (NEW): When seat_inventory feature is enabled
+                // Calculate price first (for all scenarios)
                 // ====================================================================
+                $totalPrice = count($validated['seat_ids']) * $screening->price;
+
                 if ($useSeatInventory) {
                     $inventoryService = app(SeatInventoryService::class);
                     
@@ -182,7 +185,7 @@ class PaymentController extends Controller
                             'customer_phone' => $validated['customer_phone'] ?? null,
                             'user_id' => $userId,
                             'screening_id' => $validated['screening_id'],
-                            'total_amount' => 0,
+                            'total_amount' => $totalPrice,
                             'currency' => 'ARS',
                             'status' => Order::STATUS_RESERVED,
                             'ip_address' => $request->ip(),
@@ -239,6 +242,7 @@ class PaymentController extends Controller
                 } else {
                     // ====================================================================
                     // Legacy path: When seat_inventory is disabled
+                    // Still create pre-payment tickets (old behavior)
                     // ====================================================================
                     foreach ($validated['seat_ids'] as $seatId) {
                         $existingTicket = $screening->tickets()
@@ -258,61 +262,63 @@ class PaymentController extends Controller
                 }
 
                 // ====================================================================
-                // Create Tickets (common to both paths)
+                // Initiate payment (NO TICKETS CREATED YET in seat_inventory mode)
                 // ====================================================================
-                $ticketStatus = $useSeatInventory ? 'processing' : 'pending_payment';
-                
-                foreach ($validated['seat_ids'] as $seatId) {
-                    $ticket = Ticket::create([
-                        'screening_id' => $validated['screening_id'],
-                        'seat_id' => $seatId,
-                        'user_id' => $userId,
-                        'order_id' => $orderId,
-                        'ticket_number' => null,
-                        'price' => $screening->price,
-                        'customer_email' => $validated['customer_email'],
-                        'customer_name' => $validated['customer_name'],
-                        'customer_phone' => $request->input('customer_phone'),
-                        'status' => $ticketStatus,
-                        'ip_address' => $request->ip(),
-                    ]);
-
-                    $tickets[] = [
-                        'id' => $ticket->id,
-                        'seat_id' => $seatId,
-                        'price' => $ticket->price,
+                if ($useSeatInventory) {
+                    // Order-first: Initiate payment linked to order
+                    $result = $this->paymentManager->initiateOrderPayment(
+                        Order::find($orderId),
+                        $validated['payment_provider_id'],
+                        [
+                            'seat_ids' => $validated['seat_ids'],
+                            'seat_count' => count($validated['seat_ids']),
+                            'total_price' => $totalPrice,
+                        ]
+                    );
+                    
+                    if ($result['payment_ticket_id'] ?? false) {
+                        $paymentTicketId = $result['payment_ticket_id'];
+                    }
+                } else {
+                    // Legacy: Create pre-payment tickets then initiate
+                    $tickets = [];
+                    foreach ($validated['seat_ids'] as $seatId) {
+                        $ticket = Ticket::create([
+                            'screening_id' => $validated['screening_id'],
+                            'seat_id' => $seatId,
+                            'user_id' => $userId,
+                            'order_id' => $orderId,
+                            'ticket_number' => null,
+                            'price' => $screening->price,
+                            'customer_email' => $validated['customer_email'],
+                            'customer_name' => $validated['customer_name'],
+                            'customer_phone' => $request->input('customer_phone'),
+                            'status' => 'pending_payment',
+                            'ip_address' => $request->ip(),
+                        ]);
+                        $tickets[] = ['id' => $ticket->id, 'seat_id' => $seatId, 'price' => $ticket->price];
+                    }
+                    
+                    Log::info("Legacy batch tickets created", ['count' => count($tickets)]);
+                    
+                    // Legacy initiation via first ticket
+                    $firstTicket = Ticket::find($tickets[0]['id']);
+                    $additionalData = [
+                        'total_price' => $totalPrice,
+                        'seat_count' => count($validated['seat_ids']),
+                        'all_ticket_ids' => array_column($tickets, 'id'),
                     ];
-                    $totalPrice += $ticket->price;
+                    
+                    $result = $this->paymentManager->initiatePayment(
+                        $firstTicket,
+                        $validated['payment_provider_id'],
+                        $additionalData
+                    );
+                    
+                    if ($result['payment_ticket_id'] ?? false) {
+                        $paymentTicketId = $result['payment_ticket_id'];
+                    }
                 }
-
-                Log::info("Batch tickets created", [
-                    'count' => count($tickets),
-                    'total_price' => $totalPrice,
-                    'status' => $ticketStatus,
-                ]);
-
-                // Update order total if created
-                if ($orderId) {
-                    Order::find($orderId)->update(['total_amount' => $totalPrice]);
-                }
-
-                // ====================================================================
-                // Initiate payment
-                // ====================================================================
-                $firstTicket = Ticket::find($tickets[0]['id']);
-                $additionalData = $validated['additional_data'] ?? [];
-                $additionalData['total_price'] = $totalPrice;
-                $additionalData['seat_count'] = count($validated['seat_ids']);
-                $additionalData['all_ticket_ids'] = array_column($tickets, 'id');
-                if ($orderId) {
-                    $additionalData['order_id'] = $orderId;
-                }
-                
-                $result = $this->paymentManager->initiatePayment(
-                    $firstTicket,
-                    $validated['payment_provider_id'],
-                    $additionalData
-                );
 
                 if (!$result['success']) {
                     Log::warning("Batch payment initiation failed", ['result' => $result['message'] ?? 'Unknown']);
@@ -320,10 +326,6 @@ class PaymentController extends Controller
                     // Cleanup on payment failure
                     if ($useSeatInventory && $orderId) {
                         $inventoryService->releaseSeatsByOrder($orderId, 'payment_failed');
-                    }
-                    
-                    foreach ($tickets as $t) {
-                        Ticket::find($t['id'])->update(['status' => 'payment_failed']);
                     }
                     
                     if ($orderId) {
@@ -345,16 +347,16 @@ class PaymentController extends Controller
                 DB::commit();
                 
                 Log::info("Batch payment initiated successfully", [
-                    'ticket_count' => count($tickets),
+                    'order_id' => $orderId ?? 'N/A',
                     'transaction_id' => $result['transaction_id'] ?? 'N/A',
                 ]);
 
                 $response = [
                     'success' => true,
-                    'tickets' => $tickets,
                     'total_price' => $totalPrice,
                     'seats_count' => count($validated['seat_ids']),
                     'transaction_id' => $result['transaction_id'] ?? null,
+                    'payment_ticket_id' => $paymentTicketId,
                     'redirect_url' => $result['redirect_url'] ?? null,
                     'requires_redirect' => $result['requires_redirect'] ?? false,
                     'message' => $result['message'] ?? 'Payment initiated.',
@@ -369,7 +371,7 @@ class PaymentController extends Controller
 
             } catch (QueryException $e) {
                 DB::rollBack();
-                Log::error("Database error", ['code' => $e->getCode()]);
+                Log::error("Database error in batch payment", ['code' => $e->getCode()]);
                 
                 if ($e->getCode() == 23000) {
                     return response()->json([
@@ -391,6 +393,7 @@ class PaymentController extends Controller
                 'message' => $e->getMessage(),
             ], 500);
         }
+    }
     }
 
     public function processPayment(Request $request): JsonResponse
@@ -423,6 +426,7 @@ class PaymentController extends Controller
                 
                 $orderId = null;
                 $orderNumber = null;
+                $paymentTicketId = null;
 
                 // ====================================================================
                 // Order-first path (NEW): When seat_inventory feature is enabled
@@ -453,7 +457,7 @@ class PaymentController extends Controller
                             'customer_phone' => $validated['customer_phone'] ?? null,
                             'user_id' => $userId,
                             'screening_id' => $validated['screening_id'],
-                            'total_amount' => 0,
+                            'total_amount' => $screening->price,
                             'currency' => 'ARS',
                             'status' => Order::STATUS_RESERVED,
                             'ip_address' => $request->ip(),
@@ -527,47 +531,57 @@ class PaymentController extends Controller
                 }
 
                 // ====================================================================
-                // Create Ticket (common to both paths)
+                // Initiate payment (NO TICKET CREATED YET in seat_inventory mode)
                 // ====================================================================
-                $ticketStatus = $useSeatInventory ? 'processing' : 'pending_payment';
-                
-                $ticket = Ticket::create([
-                    'screening_id' => $validated['screening_id'],
-                    'seat_id' => $validated['seat_id'],
-                    'user_id' => $userId,
-                    'order_id' => $orderId,
-                    'ticket_number' => null,
-                    'price' => $screening->price,
-                    'customer_email' => $validated['customer_email'],
-                    'customer_name' => $validated['customer_name'],
-                    'customer_phone' => $request->input('customer_phone'),
-                    'status' => $ticketStatus,
-                    'ip_address' => $request->ip(),
-                ]);
+                if ($useSeatInventory) {
+                    // Order-first: Initiate payment linked to order
+                    $result = $this->paymentManager->initiateOrderPayment(
+                        Order::find($orderId),
+                        $validated['payment_provider_id'],
+                        [
+                            'seat_ids' => [$validated['seat_id']],
+                            'seat_count' => 1,
+                            'total_price' => $screening->price,
+                        ]
+                    );
+                    
+                    if ($result['payment_ticket_id'] ?? false) {
+                        $paymentTicketId = $result['payment_ticket_id'];
+                    }
+                } else {
+                    // Legacy: Create pre-payment ticket then initiate
+                    $ticket = Ticket::create([
+                        'screening_id' => $validated['screening_id'],
+                        'seat_id' => $validated['seat_id'],
+                        'user_id' => $userId,
+                        'order_id' => $orderId,
+                        'ticket_number' => null,
+                        'price' => $screening->price,
+                        'customer_email' => $validated['customer_email'],
+                        'customer_name' => $validated['customer_name'],
+                        'customer_phone' => $request->input('customer_phone'),
+                        'status' => 'pending_payment',
+                        'ip_address' => $request->ip(),
+                    ]);
 
-                Log::info("Ticket created", ['ticket_id' => $ticket->id, 'status' => $ticketStatus]);
+                    Log::info("Legacy ticket created", ['ticket_id' => $ticket->id]);
 
-                // Update order total if created
-                if ($orderId) {
-                    Order::find($orderId)->update(['total_amount' => $screening->price]);
+                    $additionalData = [
+                        'total_price' => $screening->price,
+                        'seat_count' => 1,
+                        'all_ticket_ids' => [$ticket->id],
+                    ];
+                    
+                    $result = $this->paymentManager->initiatePayment(
+                        $ticket,
+                        $validated['payment_provider_id'],
+                        $additionalData
+                    );
+                    
+                    if ($result['payment_ticket_id'] ?? false) {
+                        $paymentTicketId = $result['payment_ticket_id'];
+                    }
                 }
-
-                // ====================================================================
-                // Initiate payment
-                // ====================================================================
-                $additionalData = $validated['additional_data'] ?? [];
-                $additionalData['total_price'] = $screening->price;
-                $additionalData['seat_count'] = 1;
-                $additionalData['all_ticket_ids'] = [$ticket->id];
-                if ($orderId) {
-                    $additionalData['order_id'] = $orderId;
-                }
-                
-                $result = $this->paymentManager->initiatePayment(
-                    $ticket,
-                    $validated['payment_provider_id'],
-                    $additionalData
-                );
 
                 if (!$result['success']) {
                     Log::warning("Payment initiation failed", ['result' => $result['message'] ?? 'Unknown']);
@@ -576,8 +590,6 @@ class PaymentController extends Controller
                     if ($useSeatInventory && $orderId) {
                         $inventoryService->releaseSeatsByOrder($orderId, 'payment_failed');
                     }
-                    
-                    $ticket->update(['status' => 'payment_failed']);
                     
                     if ($orderId) {
                         Order::find($orderId)->update([
@@ -598,14 +610,14 @@ class PaymentController extends Controller
                 DB::commit();
                 
                 Log::info("Payment initiated successfully", [
-                    'ticket_id' => $ticket->id,
+                    'order_id' => $orderId ?? 'N/A',
                     'transaction_id' => $result['transaction_id'] ?? 'N/A',
                 ]);
 
                 $response = [
                     'success' => true,
-                    'ticket_id' => $ticket->id,
                     'transaction_id' => $result['transaction_id'] ?? null,
+                    'payment_ticket_id' => $paymentTicketId,
                     'redirect_url' => $result['redirect_url'] ?? null,
                     'requires_redirect' => $result['requires_redirect'] ?? false,
                     'message' => $result['message'] ?? 'Payment initiated.',
