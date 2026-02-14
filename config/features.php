@@ -29,7 +29,7 @@ return [
      *  - Set env variable: FEATURE_SEAT_INVENTORY=true
      *  - Or set this to true directly below
      */
-    'seat_inventory' => env('FEATURE_SEAT_INVENTORY', false),
+    'seat_inventory' => env('FEATURE_SEAT_INVENTORY', true),
 
     /**
      * FEATURE_AUTO_RECLAIM_EXPIRED_SEATS
