@@ -95,7 +95,7 @@ class PayPalHandler extends PaymentProviderHandler
                 return false;
             }
             
-            $paymentTicket = PaymentProviderTicket::where('transaction_id', $paymentId)->first();
+            $paymentTicket = PaymentProviderTicket::findByTransactionOrId($paymentId);
             
             if (!$paymentTicket) {
                 return false;

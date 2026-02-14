@@ -77,12 +77,19 @@ class PaymentProviderManager
             throw new \Exception("Payment provider is inactive");
         }
         
-        // Crear registro de pago
-        $paymentTicket = PaymentProviderTicket::create([
+        // Crear registro de pago (con order_id si existe en additionalData)
+        $paymentTicketData = [
             'ticket_id' => $ticket->id,
             'payment_provider_id' => $provider->id,
             'status' => 'pending',
-        ]);
+        ];
+        
+        // Agregar order_id si existe en additionalData
+        if (isset($additionalData['order_id'])) {
+            $paymentTicketData['order_id'] = $additionalData['order_id'];
+        }
+        
+        $paymentTicket = PaymentProviderTicket::create($paymentTicketData);
         
         // Procesar pago
         $handler = $this->getHandler($provider);
@@ -166,12 +173,19 @@ class PaymentProviderManager
             throw new \Exception("Payment method '{$paymentMethod}' not supported by this provider");
         }
 
-        // Crear registro de pago
-        $paymentTicket = PaymentProviderTicket::create([
+        // Crear registro de pago (con order_id si existe)
+        $paymentTicketData = [
             'ticket_id' => $ticket->id,
             'payment_provider_id' => $provider->id,
             'status' => 'pending',
-        ]);
+        ];
+        
+        // Agregar order_id si existe en additionalData
+        if (isset($additionalData['order_id'])) {
+            $paymentTicketData['order_id'] = $additionalData['order_id'];
+        }
+        
+        $paymentTicket = PaymentProviderTicket::create($paymentTicketData);
 
         try {
             // Obtener el handler correcto según el método

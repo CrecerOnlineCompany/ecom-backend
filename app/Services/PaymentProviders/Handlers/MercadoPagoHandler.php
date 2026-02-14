@@ -104,7 +104,7 @@ class MercadoPagoHandler extends PaymentProviderHandler
                             'unit_price' => $itemPrice,
                         ]
                     ],
-                    'external_reference' => (string)$paymentTicket->id,
+                    'external_reference' => $paymentTicket->generateExternalReference('MP'),
                     'notification_url' => $this->provider->getWebhookUrl(),
                 ];
 
@@ -201,7 +201,7 @@ class MercadoPagoHandler extends PaymentProviderHandler
                 $externalId = $request->input('data.id');
                 $paymentStatus = $request->input('data.status');
                 
-                $paymentTicket = PaymentProviderTicket::where('transaction_id', $externalId)->first();
+                $paymentTicket = PaymentProviderTicket::findByTransactionOrId($externalId);
                 
                 if (!$paymentTicket) {
                     return false;

@@ -47,7 +47,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
 
             $price = floatval($additionalData['total_price'] ?? $ticket->price);
             $seatCount = intval($additionalData['seat_count'] ?? 1);
-            $externalReference = "CINEA-POINT-{$paymentTicket->id}";
+            $externalReference = $paymentTicket->generateExternalReference('POINT');
             $amountFormatted = number_format($price, 2, '.', '');
 
             // ===== PRE-CHECK: Auto-cancel global por terminal si está habilitado =====
@@ -356,8 +356,8 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                 return false;
             }
 
-            // Buscar PaymentProviderTicket por transaction_id = order_id
-            $paymentTicket = PaymentProviderTicket::where('transaction_id', $orderId)->first();
+            // Buscar PaymentProviderTicket por transaction_id o ID
+            $paymentTicket = PaymentProviderTicket::findByTransactionOrId($orderId);
 
             if (!$paymentTicket) {
                 Log::warning('MercadoPagoPoint: PaymentProviderTicket no encontrado', [

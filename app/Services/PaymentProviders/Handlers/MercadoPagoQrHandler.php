@@ -392,19 +392,27 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
     }
 
     /**
-     * Buscar PaymentProviderTicket por transaction_id o external_reference
+     * Buscar PaymentProviderTicket por transaction_id, external_reference o payment_provider_ticket_id
      */
     private function findPaymentTicket(string $externalId, array $data): ?PaymentProviderTicket
     {
-        $paymentTicket = PaymentProviderTicket::where('transaction_id', $externalId)->first();
+        // Primero intentar con el método estático que busca transaction_id
+        $paymentTicket = PaymentProviderTicket::findByTransactionOrId($externalId);
         
         if ($paymentTicket) {
             return $paymentTicket;
         }
 
+        // Intentar por external_reference en response_data (JSON)
         $externalReference = $data['external_reference'] ?? $data['data']['external_reference'] ?? null;
         if (!empty($externalReference)) {
             $paymentTicket = PaymentProviderTicket::whereJsonContains('response_data->external_reference', $externalReference)->first();
+            if ($paymentTicket) {
+                return $paymentTicket;
+            }
+            
+            // Fallback: buscar en reference_number (si se usara)
+            $paymentTicket = PaymentProviderTicket::where('reference_number', $externalReference)->first();
             if ($paymentTicket) {
                 return $paymentTicket;
             }

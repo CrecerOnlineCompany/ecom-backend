@@ -12,6 +12,7 @@ class PaymentProviderTicket extends Model
 
     protected $fillable = [
         'ticket_id',
+        'order_id',
         'payment_provider_id',
         'status',
         'transaction_id',
@@ -33,6 +34,14 @@ class PaymentProviderTicket extends Model
     public function ticket(): BelongsTo
     {
         return $this->belongsTo(Ticket::class);
+    }
+
+    /**
+     * Relación con order (nullable para compatibilidad)
+     */
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
     }
 
     /**
@@ -160,4 +169,82 @@ class PaymentProviderTicket extends Model
         $this->update([
             'response_data' => array_merge($this->response_data ?? [], $data),
         ]);
+    }
+
+    /**
+     * Encontrar por transaction_id o si no existe, por payment_provider_ticket_id
+     * Usado en webhooks y status checks
+     */
+    public static function findByTransactionOrId($transactionId): ?self
+    {
+        // Primero intentar por transaction_id
+        $ticket = static::where('transaction_id', $transactionId)->first();
+        
+        if ($ticket) {
+            return $ticket;
+        }
+        
+        // Fallback: intentar como payment_provider_ticket_id
+        if (is_numeric($transactionId)) {
+            $ticket = static::find((int)$transactionId);
+            if ($ticket) {
+                return $ticket;
+            }
+        }
+        
+        return null;
+    }
+
+    /**
+     * Generar external_reference para usar en payment providers
+     * Formato: CINEA-ORDER-{order_number}-ATT-{payment_ticket_id}
+     * O fallback: CINEA-POINT-{payment_ticket_id} si no hay order
+     * O terminal: CINEA-TERMINAL-{payment_ticket_id}
+     */
+    public function generateExternalReference(string $prefix = 'POINT'): string
+    {
+        // Si tiene order asociada, usar order_number
+        if ($this->order && $this->order->order_number) {
+            return "CINEA-ORDER-{$this->order->order_number}-ATT-{$this->id}";
+        }
+        
+        // Fallback a payment_provider por nombre o prefix dado
+        if ($this->paymentProvider) {
+            if (strpos($this->paymentProvider->name, 'terminal') !== false) {
+                return "CINEA-TERMINAL-{$this->id}";
+            }
+            if (strpos($this->paymentProvider->name, 'qr') !== false) {
+                return "CINEA-QR-{$this->id}";
+            }
+        }
+        
+        return "CINEA-{$prefix}-{$this->id}";
+    }
+
+    /**
+     * Scopes para búsquedas comunes
+     */
+    public function scopeByOrder($query, $orderId)
+    {
+        return $query->where('order_id', $orderId);
+    }
+
+    public function scopeByTicket($query, $ticketId)
+    {
+        return $query->where('ticket_id', $ticketId);
+    }
+
+    public function scopeApproved($query)
+    {
+        return $query->where('status', 'approved');
+    }
+
+    public function scopePending($query)
+    {
+        return $query->where('status', 'pending');
+    }
+
+    public function scopeProcessing($query)
+    {
+        return $query->where('status', 'processing');
     }}
