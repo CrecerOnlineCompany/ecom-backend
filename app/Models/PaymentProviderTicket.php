@@ -22,7 +22,7 @@ class PaymentProviderTicket extends Model
     ];
 
     protected $casts = [
-        'response_data' => 'array',
+        'response_data' => 'json', // JSON en BD, automáticamente decodificado a array
         'initiated_at' => 'datetime',
         'completed_at' => 'datetime',
     ];
@@ -69,6 +69,11 @@ class PaymentProviderTicket extends Model
             'response_data' => array_merge($this->response_data ?? [], $responseData),
             'completed_at' => now(),
         ]);
+
+        // Confirmar el ticket asociado
+        if ($this->ticket) {
+            $this->ticket->update(['status' => 'confirmed']);
+        }
     }
 
     /**
@@ -94,4 +99,65 @@ class PaymentProviderTicket extends Model
             'completed_at' => now(),
         ]);
     }
-}
+
+    /**
+     * Marcar como queued/processing con response_data
+     */
+    public function markQueued(array $responseData = []): void
+    {
+        $this->update([
+            'status' => 'queued',
+            'response_data' => array_merge($this->response_data ?? [], $responseData, [
+                'queued_at' => now()->toIso8601String(),
+            ]),
+        ]);
+    }
+
+    /**
+     * Marcar como cancelada
+     */
+    public function markCancelled(string $reason = ''): void
+    {
+        $this->update([
+            'status' => 'cancelled',
+            'response_data' => array_merge($this->response_data ?? [], [
+                'cancelled_at' => now()->toIso8601String(),
+                'cancel_reason' => $reason,
+            ]),
+            'completed_at' => now(),
+        ]);
+    }
+
+    /**
+     * Marcar como expirada
+     */
+    public function markExpired(string $reason = ''): void
+    {
+        $this->update([
+            'status' => 'expired',
+            'response_data' => array_merge($this->response_data ?? [], [
+                'expired_at' => now()->toIso8601String(),
+                'expiry_reason' => $reason,
+            ]),
+            'completed_at' => now(),
+        ]);
+    }
+
+    /**
+     * Obtener del response_data con fallback a null
+     */
+    public function getResponseData(string $key, $default = null)
+    {
+        $data = $this->response_data ?? [];
+        return data_get($data, $key, $default);
+    }
+
+    /**
+     * Actualizar response_data mergeando con lo existente
+     */
+    public function updateResponseData(array $data): void
+    {
+        $this->update([
+            'response_data' => array_merge($this->response_data ?? [], $data),
+        ]);
+    }}

@@ -1,8 +1,7 @@
 <?php
 
 use Illuminate\Routing\Router;
-
-Admin::routes();
+use Illuminate\Support\Facades\Route;
 
 Route::group([
     'prefix'        => config('admin.route.prefix'),
@@ -41,5 +40,6 @@ Route::group([
 
     // Payment Providers
     $router->resource('payment-providers', 'PaymentProviderController');
+    $router->post('payment-providers/mp-terminals', 'PaymentProviderController@getMercadoPagoTerminals')->name('payment-providers.mp-terminals');
 
 });

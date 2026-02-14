@@ -37,6 +37,8 @@ Route::get('/screenings/{screening}/available-seats', [ScreeningController::clas
 // Public payment routes
 Route::get('/payment-providers', [PaymentController::class, 'index']);
 Route::get('/payment-providers/{id}', [PaymentController::class, 'show']);
+Route::get('/payment-methods', [PaymentController::class, 'getMethods']);
+Route::get('/payment-methods/{method}/providers', [PaymentController::class, 'getMethodProviders']);
 Route::match(['get', 'post'], '/payment/success', [PaymentController::class, 'success'])->name('api.payment.success');
 Route::match(['get', 'post'], '/payment/failure', [PaymentController::class, 'failure'])->name('api.payment.failure');
 Route::match(['get', 'post'], '/payment/pending', [PaymentController::class, 'pending'])->name('api.payment.pending');
@@ -48,8 +50,12 @@ Route::post('/webhooks/payment/{hash}', [PaymentController::class, 'webhook'])->
 // If auth is present, use authenticated user. If not, use guest checkout
 Route::post('/payment-process', [PaymentController::class, 'processPayment']);
 Route::post('/payment-process-batch', [PaymentController::class, 'processBatchPayment']);
+Route::post('/payment-process-qr', [PaymentController::class, 'processQrPayment']);
+Route::post('/payment-process-terminal', [PaymentController::class, 'processTerminalPayment']);
 Route::get('/payment-status/{paymentTicketId}', [PaymentController::class, 'status']);
+Route::delete('/payment-cancel/{paymentTicketId}', [PaymentController::class, 'cancelPendingPayment']);
 Route::delete('/payment-cleanup', [PaymentController::class, 'cleanup']);
+Route::get('/qr-payment/confirm/{paymentTicketId}/{token}', [PaymentController::class, 'confirmQrPayment']);
 
 // Public ticket validation (QR validation)
 Route::post('/tickets/validate-qr', [TicketController::class, 'validateByQR']);
