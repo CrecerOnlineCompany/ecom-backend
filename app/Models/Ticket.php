@@ -14,6 +14,7 @@ class Ticket extends Model
     protected $fillable = [
         'screening_id',
         'user_id',
+        'order_id',
         'seat_id',
         'ticket_number',
         'price',
@@ -61,6 +62,14 @@ class Ticket extends Model
     public function user(): BelongsTo
     {
         return $this->belongsTo(User::class);
+    }
+
+    /**
+     * Relación: Ticket pertenece a un Order (cabecera)
+     */
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
     }
 
     /**
