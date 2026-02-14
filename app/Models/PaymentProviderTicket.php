@@ -70,6 +70,10 @@ class PaymentProviderTicket extends Model
 
     /**
      * Marcar pago como aprobado
+     * 
+     * Flujo moderno con OrderFinalizationService:
+     * - Si payment tiene order_id: Finalize order (genera ticket_number, QR, marca confirmed/sold)
+     * - Si no tiene order_id (legacy): Solo marcar ticket como confirmed
      */
     public function approve(array $responseData = []): void
     {
@@ -79,8 +83,33 @@ class PaymentProviderTicket extends Model
             'completed_at' => now(),
         ]);
 
-        // Confirmar el ticket asociado
-        if ($this->ticket) {
+        // Route: Check if this payment is linked to an Order
+        if ($this->order_id) {
+            // New flow: Finalize order (generate ticket_number, QR, mark confirmed, mark seats sold)
+            \Log::info("PaymentProviderTicket approved with order", [
+                'payment_ticket_id' => $this->id,
+                'order_id' => $this->order_id,
+            ]);
+
+            $finalizationService = app(\App\Services\OrderFinalizationService::class);
+            $finalizationResult = $finalizationService->finalizeOrderAfterApproval(
+                $this->order_id,
+                $responseData
+            );
+
+            if (!$finalizationResult['success']) {
+                \Log::warning("Order finalization returned non-success", [
+                    'order_id' => $this->order_id,
+                    'result' => $finalizationResult,
+                ]);
+            }
+        } elseif ($this->ticket) {
+            // Legacy flow: Only mark ticket as confirmed (no order, no seat inventory)
+            \Log::info("PaymentProviderTicket approved without order (legacy)", [
+                'payment_ticket_id' => $this->id,
+                'ticket_id' => $this->ticket->id,
+            ]);
+
             $this->ticket->update(['status' => 'confirmed']);
         }
     }

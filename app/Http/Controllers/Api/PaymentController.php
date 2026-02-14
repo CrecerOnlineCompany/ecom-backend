@@ -189,7 +189,7 @@ class PaymentController extends Controller
                         'screening_id' => $validated['screening_id'],
                         'seat_id' => $seatId,
                         'user_id' => $userId,
-                        'ticket_number' => 'TKT-' . time() . '-' . uniqid(),
+                        'ticket_number' => null,  // Generated when payment is approved
                         'price' => $screening->price,
                         'customer_email' => $validated['customer_email'],
                         'customer_name' => $validated['customer_name'],
@@ -314,12 +314,12 @@ class PaymentController extends Controller
                     'screening_id' => $validated['screening_id'],
                     'seat_id' => $validated['seat_id'],
                     'user_id' => $userId,
-                    'ticket_number' => 'TKT-' . time() . '-' . uniqid(),
+                    'ticket_number' => null,  // Generated when payment is approved
                     'price' => $screening->price,
                     'status' => 'pending_payment',
                 ]);
 
-                Log::info("Created ticket: {$ticket->ticket_number} for payment processing");
+                Log::info("Created ticket: for payment processing");
 
                 $result = $this->paymentManager->initiatePayment(
                     $ticket,
@@ -536,7 +536,7 @@ class PaymentController extends Controller
                         'screening_id' => $validated['screening_id'],
                         'seat_id' => $seatId,
                         'user_id' => $userId,
-                        'ticket_number' => 'TKT-' . time() . '-' . uniqid(),
+                        'ticket_number' => null,  // Generated when payment is approved
                         'price' => $screening->price,
                         'customer_email' => $validated['customer_email'],
                         'customer_name' => $validated['customer_name'],
@@ -551,7 +551,7 @@ class PaymentController extends Controller
                         'seat_id' => $seatId,
                     ];
                     $totalPrice += $ticket->price;
-                    Log::info("Created QR ticket ID: {$ticket->id}, Number: {$ticket->ticket_number}, Seat: {$seatId}");
+                    Log::info("Created QR ticket ID: {$ticket->id}, Seat: {$seatId}");
                 }
                 Log::info("All " . count($validated['seat_ids']) . " tickets created, Total Price: {$totalPrice}");
 
@@ -852,7 +852,7 @@ class PaymentController extends Controller
                         'seat_id' => $seatId,
                         'user_id' => $userId,
                         'order_id' => $orderId,  // Link to Order if created
-                        'ticket_number' => 'TKT-' . time() . '-' . uniqid(),
+                        'ticket_number' => null,  // Generated when payment is approved
                         'price' => $screening->price,
                         'customer_email' => $validated['customer_email'],
                         'customer_name' => $validated['customer_name'],
