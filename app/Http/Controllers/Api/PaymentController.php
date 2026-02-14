@@ -3,11 +3,14 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
+use App\Models\Order;
 use App\Models\Ticket;
 use App\Models\Screening;
 use App\Models\PaymentProviderTicket;
 use App\Services\PaymentProviders\PaymentProviderManager;
 use App\Services\PaymentMethods\PaymentMethodService;
+use App\Services\SeatInventoryService;
+use App\Services\OrderNumberGenerator;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -636,7 +639,7 @@ class PaymentController extends Controller
     {
         try {
             Log::info("=== INICIO PROCESS TERMINAL PAYMENT ===");
-            Log::info("Request data: " . json_encode($request->all()));
+            Log::info("Request data: Screening ID, Seats Count, Email (no PII logging)");
             
             $validated = $request->validate([
                 'screening_id' => 'required|exists:screenings,id',
@@ -647,81 +650,216 @@ class PaymentController extends Controller
                 'customer_name' => 'required|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
                 'additional_data' => 'array',
+                'terminal_id' => 'nullable|string|max:50',  // For holder identification
             ]);
 
             $user = auth()->user();
-            $userId = $user?->id ?? 1;
+            $userId = $user?->id ?? null;
             
-            Log::info("Terminal Payment validated successfully");
-            Log::info("User ID: {$userId}, Email: {$validated['customer_email']}, Seats: " . implode(',', $validated['seat_ids']) . ", Screening: {$validated['screening_id']}");
+            // Determine holder for seat inventory
+            $holderType = 'terminal';
+            $holderId = $validated['terminal_id'] ?? 'session_' . session()->getId();
+            
+            if ($userId) {
+                $holderType = 'user';
+                $holderId = (string)$userId;
+            }
+            
+            Log::info("Terminal payment started", [
+                'screening_id' => $validated['screening_id'],
+                'seat_count' => count($validated['seat_ids']),
+                'holder_type' => $holderType,
+                'feature_seat_inventory' => (bool)config('features.seat_inventory'),
+            ]);
 
             DB::beginTransaction();
             Log::info("Database transaction started");
 
             try {
                 $screening = Screening::find($validated['screening_id']);
-                Log::info("Screening found: {$screening->id}, Price: {$screening->price}");
+                Log::info("Screening found", ['screening_id' => $screening->id]);
                 
                 $tickets = [];
                 $totalPrice = 0;
+                $orderId = null;
+                $orderNumber = null;
 
-                // Verify all seats are available
-                Log::info("Verifying " . implode(',', $validated['seat_ids']) . " seats availability");
-                foreach ($validated['seat_ids'] as $seatId) {
-                    // Buscar tickets confirmados (vendidos) para este asiento
-                    $confirmedTicket = $screening->tickets()
-                        ->where('seat_id', $seatId)
-                        ->where('status', 'confirmed')
-                        ->first();
+                // ====================================================================
+                // FEATURE FLAG: Use new seat inventory system if enabled
+                // ====================================================================
+                $useSeatInventory = (bool)config('features.seat_inventory', false);
+                
+                if ($useSeatInventory) {
+                    Log::info("Using seat inventory system (FEATURE_SEAT_INVENTORY enabled)");
                     
-                    if ($confirmedTicket) {
-                        Log::warning("Seat {$seatId} is already booked (confirmed)");
+                    // Initialize seat inventory service
+                    $inventoryService = app(\App\Services\SeatInventoryService::class);
+                    
+                    // Step 1: Ensure screening seats exist
+                    try {
+                        $ensureResult = $inventoryService->ensureScreeningSeats($validated['screening_id']);
+                        Log::info("Screening seats ensured", [
+                            'created' => $ensureResult['created'],
+                            'existing' => $ensureResult['existing'],
+                        ]);
+                    } catch (\Exception $e) {
+                        Log::error("Failed to ensure screening seats", ['error' => $e->getMessage()]);
                         DB::rollBack();
                         return response()->json([
                             'success' => false,
-                            'message' => "El asiento {$seatId} ya está vendido.",
-                            'error_code' => 'SEAT_UNAVAILABLE',
-                        ], 422);
+                            'message' => 'No se pudo verificar la disponibilidad de asientos.',
+                            'error_code' => 'INVENTORY_ERROR',
+                        ], 500);
                     }
-                    
-                    // Buscar tickets pendientes o procesando para este asiento
-                    $pendingTicket = $screening->tickets()
-                        ->where('seat_id', $seatId)
-                        ->whereIn('status', ['pending_payment', 'processing'])
-                        ->first();
-                    
-                    if ($pendingTicket && $pendingTicket->user_id !== $userId) {
-                        // Es de otro usuario
-                        Log::warning("Seat {$seatId} is being processed by another user");
+
+                    // Step 2: Create or get Order (cabinet for seats)
+                    try {
+                        $orderClass = \App\Models\Order::class;
+                        $order = $orderClass::create([
+                            'uuid' => \Illuminate\Support\Str::uuid(),
+                            'order_number' => \App\Services\OrderNumberGenerator::generate(),
+                            'customer_name' => $validated['customer_name'],
+                            'customer_email' => $validated['customer_email'],
+                            'customer_phone' => $validated['customer_phone'] ?? null,
+                            'user_id' => $userId,
+                            'screening_id' => $validated['screening_id'],
+                            'total_amount' => 0,  // Will update after reservation
+                            'currency' => 'ARS',
+                            'status' => 'reserved',
+                            'purchase_device' => 'terminal',
+                            'ip_address' => $request->ip(),
+                            'reserved_until' => now()->addMinutes(6),  // 6 minutes TTL
+                        ]);
+                        
+                        $orderId = $order->id;
+                        $orderNumber = $order->order_number;
+                        
+                        Log::info("Order created for seat reservation", [
+                            'order_id' => $orderId,
+                            'order_number' => $orderNumber,
+                        ]);
+                    } catch (\Exception $e) {
+                        Log::error("Failed to create order", ['error' => $e->getMessage()]);
                         DB::rollBack();
                         return response()->json([
                             'success' => false,
-                            'message' => "El asiento {$seatId} está siendo procesado. Por favor intenta de nuevo en unos momentos.",
-                            'error_code' => 'SEAT_PROCESSING',
+                            'message' => 'Error creating order. Please try again.',
+                            'error_code' => 'ORDER_CREATION_ERROR',
+                        ], 500);
+                    }
+
+                    // Step 3: Reserve seats atomically
+                    Log::info("Attempting to reserve seats", ['count' => count($validated['seat_ids'])]);
+                    
+                    // TTL for seat reservation: 6 minutes (360 seconds) - reasonable for terminal checkout
+                    $seatReservationTTL = 360;
+                    
+                    $reservationResult = $inventoryService->reserveSeats(
+                        screening_id: $validated['screening_id'],
+                        seat_ids: $validated['seat_ids'],
+                        holder_type: $holderType,
+                        holder_id: $holderId,
+                        ttl_seconds: $seatReservationTTL,
+                        order_id: $orderId
+                    );
+
+                    if (!$reservationResult['success']) {
+                        Log::warning("Seat reservation failed", [
+                            'failed_seats' => $reservationResult['failed'],
+                        ]);
+                        
+                        // Clean up: Release the order
+                        $order->update(['status' => 'cancelled', 'cancelled_at' => now()]);
+                        
+                        DB::rollBack();
+                        
+                        // Build detailed error message
+                        $failureDetails = [];
+                        foreach ($reservationResult['failed'] as $seatId => $reason) {
+                            $failureDetails[] = [
+                                'seat_id' => $seatId,
+                                'reason' => $reason,
+                                'error_code' => $reason === 'Sold' ? 'SEAT_SOLD' : 'SEAT_RESERVED',
+                            ];
+                        }
+                        
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Algunos asientos no están disponibles.',
+                            'error_code' => 'SEATS_UNAVAILABLE',
+                            'failed_seats' => $failureDetails,
                         ], 422);
                     }
+
+                    Log::info("Seats reserved successfully", [
+                        'reserved_count' => count($reservationResult['reserved']),
+                    ]);
+
+                } else {
+                    // ====================================================================
+                    // LEGACY: Use old ticket-based checking
+                    // ====================================================================
+                    Log::info("Using legacy ticket-based system (seat inventory disabled)");
                     
-                    // Si es del mismo usuario, eliminar el anterior y permitir nuevo intento
-                    if ($pendingTicket && $pendingTicket->user_id === $userId) {
-                        Log::info("Deleting previous pending ticket {$pendingTicket->id} for seat {$seatId} from user {$userId}");
-                        $pendingTicket->delete();
+                    foreach ($validated['seat_ids'] as $seatId) {
+                        // Buscar tickets confirmados (vendidos) para este asiento
+                        $confirmedTicket = $screening->tickets()
+                            ->where('seat_id', $seatId)
+                            ->where('status', 'confirmed')
+                            ->first();
+                        
+                        if ($confirmedTicket) {
+                            Log::warning("Legacy check: Seat already booked", ['seat_id' => $seatId]);
+                            DB::rollBack();
+                            return response()->json([
+                                'success' => false,
+                                'message' => "El asiento {$seatId} ya está vendido.",
+                                'error_code' => 'SEAT_UNAVAILABLE',
+                            ], 422);
+                        }
+                        
+                        // Buscar tickets pendientes o procesando para este asiento
+                        $pendingTicket = $screening->tickets()
+                            ->where('seat_id', $seatId)
+                            ->whereIn('status', ['pending_payment', 'processing'])
+                            ->first();
+                        
+                        if ($pendingTicket && $pendingTicket->user_id !== $userId) {
+                            Log::warning("Legacy check: Seat being processed by another user", ['seat_id' => $seatId]);
+                            DB::rollBack();
+                            return response()->json([
+                                'success' => false,
+                                'message' => "El asiento {$seatId} está siendo procesado. Por favor intenta de nuevo en unos momentos.",
+                                'error_code' => 'SEAT_PROCESSING',
+                            ], 422);
+                        }
+                        
+                        if ($pendingTicket && $pendingTicket->user_id === $userId) {
+                            Log::info("Legacy check: Deleting previous pending ticket", ['seat_id' => $seatId]);
+                            $pendingTicket->delete();
+                        }
                     }
                 }
-                Log::info("All seats are available");
 
-                // Create tickets for each seat
-                Log::info("Creating " . count($validated['seat_ids']) . " terminal tickets");
+                // ====================================================================
+                // Create tickets (same flow regardless of inventory system)
+                // ====================================================================
+                Log::info("Creating tickets", ['count' => count($validated['seat_ids'])]);
+                
                 foreach ($validated['seat_ids'] as $seatId) {
                     $ticket = Ticket::create([
                         'screening_id' => $validated['screening_id'],
                         'seat_id' => $seatId,
                         'user_id' => $userId,
+                        'order_id' => $orderId,  // Link to Order if created
                         'ticket_number' => 'TKT-' . time() . '-' . uniqid(),
                         'price' => $screening->price,
                         'customer_email' => $validated['customer_email'],
                         'customer_name' => $validated['customer_name'],
                         'customer_phone' => $request->input('customer_phone'),
                         'status' => 'pending_payment',
+                        'purchase_device' => 'terminal',
+                        'ip_address' => $request->ip(),
                     ]);
 
                     $tickets[] = [
@@ -729,21 +867,28 @@ class PaymentController extends Controller
                         'ticket_number' => $ticket->ticket_number,
                         'price' => $ticket->price,
                         'seat_id' => $seatId,
+                        'order_id' => $orderId,
                     ];
                     $totalPrice += $ticket->price;
-                    Log::info("Created terminal ticket ID: {$ticket->id}, Number: {$ticket->ticket_number}, Seat: {$seatId}");
+                    Log::info("Ticket created", ['ticket_id' => $ticket->id]);
                 }
-                Log::info("All tickets created, Total Price: {$totalPrice}");
 
-                // Process payment with terminal handler using first ticket
+                // Update order total if created
+                if ($orderId) {
+                    \App\Models\Order::find($orderId)->update(['total_amount' => $totalPrice]);
+                }
+
+                // ====================================================================
+                // Process payment (unchanged logic)
+                // ====================================================================
                 $firstTicket = Ticket::find($tickets[0]['id']);
                 $additionalData = $validated['additional_data'] ?? [];
                 $additionalData['total_price'] = $totalPrice;
                 $additionalData['seat_count'] = count($validated['seat_ids']);
                 $additionalData['all_ticket_ids'] = array_column($tickets, 'id');
+                $additionalData['order_id'] = $orderId;
                 
                 Log::info("Initiating terminal payment with PaymentProviderManager");
-                Log::info("Additional data: " . json_encode($additionalData));
                 
                 $result = $this->paymentManager->initiatePaymentWithMethod(
                     $firstTicket,
@@ -752,13 +897,27 @@ class PaymentController extends Controller
                     $additionalData
                 );
                 
-                Log::info("Payment manager returned: " . json_encode($result));
+                Log::info("Payment manager result received");
 
                 if (!$result['success']) {
-                    Log::warning("Terminal payment processing failed: " . ($result['message'] ?? 'Unknown error'));
+                    Log::warning("Terminal payment processing failed", ['message' => $result['message'] ?? 'Unknown']);
+                    
+                    // Release seats if using inventory system
+                    if ($useSeatInventory && $orderId) {
+                        $inventoryService->releaseSeatsByOrder($orderId, 'payment_failed');
+                    }
+                    
                     foreach ($tickets as $t) {
                         Ticket::find($t['id'])->update(['status' => 'payment_failed']);
                     }
+                    
+                    if ($orderId) {
+                        \App\Models\Order::find($orderId)->update([
+                            'status' => 'payment_failed',
+                            'cancelled_at' => now(),
+                        ]);
+                    }
+                    
                     DB::rollBack();
                     
                     return response()->json([
@@ -768,10 +927,11 @@ class PaymentController extends Controller
                 }
 
                 DB::commit();
-                Log::info("Database transaction committed successfully");
+                Log::info("Database transaction committed");
                 Log::info("=== TERMINAL PAYMENT PROCESS COMPLETED SUCCESSFULLY ===");
 
-                return response()->json([
+                // Build response
+                $response = [
                     'success' => true,
                     'tickets' => $tickets,
                     'total_price' => $totalPrice,
@@ -779,15 +939,22 @@ class PaymentController extends Controller
                     'terminal_id' => $result['terminal_id'] ?? null,
                     'transaction_id' => $result['transaction_id'] ?? null,
                     'payment_ticket_id' => $result['payment_ticket_id'] ?? null,
-                    'order_id' => $result['order_id'] ?? null,
                     'requires_polling' => $result['requires_polling'] ?? true,
                     'polling_interval' => $result['polling_interval'] ?? 3000,
                     'message' => $result['message'] ?? 'Terminal payment initiated successfully',
-                ]);
+                ];
+                
+                // Add order info if using inventory system
+                if ($useSeatInventory && $orderId) {
+                    $response['order_id'] = $orderId;
+                    $response['order_number'] = $orderNumber;
+                }
+
+                return response()->json($response);
 
             } catch (QueryException $e) {
                 DB::rollBack();
-                Log::error("Database error during terminal payment: " . $e->getMessage());
+                Log::error("Database error during terminal payment", ['error' => $e->getCode()]);
                 
                 if ($e->getCode() == 23000) {
                     return response()->json([
@@ -803,7 +970,7 @@ class PaymentController extends Controller
             if (DB::transactionLevel() > 0) {
                 DB::rollBack();
             }
-            Log::error("Terminal payment processing error: " . $e->getMessage());
+            Log::error("Terminal payment processing error", ['error' => $e->getMessage()]);
             
             return response()->json([
                 'success' => false,
