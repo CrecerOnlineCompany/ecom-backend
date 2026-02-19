@@ -326,4 +326,32 @@ class SeatInventoryService
 
         return $available;
     }
+
+    /**
+     * Obtiene IDs de asientos reservados para una orden
+     * Se usa en FinalizeOrderPaymentAction para crear tickets
+     *
+     * @param int $order_id
+     * @return array Lista de seat_ids
+     */
+    public function getReservedSeatIdsByOrder(int $order_id): array
+    {
+        return ScreeningSeat::where('order_id', $order_id)
+            ->where('status', ScreeningSeat::STATUS_RESERVED)
+            ->pluck('seat_id')
+            ->toArray();
+    }
+
+    /**
+     * Marca asientos de una orden como SOLD (después de payment confirmado)
+     * Alias más semántico para markSoldByOrder
+     * Se llama desde FinalizeOrderPaymentAction
+     *
+     * @param int $order_id
+     * @return int Cantidad de asientos marcados como sold
+     */
+    public function finalizeOrderSeatsToSold(int $order_id): int
+    {
+        return $this->markSoldByOrder($order_id);
+    }
 }

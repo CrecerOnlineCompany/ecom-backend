@@ -34,6 +34,49 @@ class PaymentProvider extends Model
     ];
 
     /**
+     * Obtener el config como array normalizado
+     */
+    public function getConfigAttribute($value)
+    {
+        // Decodificar si viene como JSON string
+        if (is_string($value)) {
+            $decoded = json_decode($value, true) ?? [];
+        } else {
+            $decoded = $value ?? [];
+        }
+        
+        // Normalizar los tipos de datos
+        if ($decoded && is_array($decoded)) {
+            // Normalizar campos booleanos que podrían tener valores incorrectos
+            foreach (self::$booleanConfigFields as $field) {
+                if (isset($decoded[$field])) {
+                    // Convertir valores string como "off", "0" a false; "on", "1" a true
+                    $decoded[$field] = $decoded[$field] === '1' || 
+                                      $decoded[$field] === 'on' || 
+                                      $decoded[$field] === true;
+                }
+            }
+            
+            // Asegurar que qr_type tenga un valor válido si está vacío o false
+            if (!isset($decoded['qr_type']) || $decoded['qr_type'] === false || $decoded['qr_type'] === '') {
+                $decoded['qr_type'] = 'native';
+            }
+        }
+        
+        return $decoded;
+    }
+
+    /**
+     * Campos que deben ser booleanos en el config
+     */
+    private static $booleanConfigFields = [
+        'supports_redirect',
+        'supports_qr',
+        'supports_terminal',
+        'auto_send',
+    ];
+
+    /**
      * Bootstrap the model
      */
     protected static function boot()
@@ -53,57 +96,66 @@ class PaymentProvider extends Model
                     Log::info('✓ Config del request es ARRAY:', $requestConfig);
                     
                     // Construir el config completo con lógica correcta
-                    $config = [];
-                    foreach ($requestConfig as $key => $value) {
-                        if ($value === '1' || $value === 'on' || $value === true) {
-                            $config[$key] = true;
-                        } elseif ($value === '0' || $value === '' || $value === false || $value === null) {
-                            $config[$key] = false;
-                        } else {
-                            $config[$key] = $value;
-                        }
-                    }
-                    
-                    // Construir supported_methods
-                    $supportedMethods = [];
-                    if ($config['supports_redirect'] ?? false) $supportedMethods[] = 'redirect';
-                    if ($config['supports_qr'] ?? false) $supportedMethods[] = 'qr';
-                    if ($config['supports_terminal'] ?? false) $supportedMethods[] = 'terminal';
-                    
-                    if (!empty($supportedMethods)) {
-                        $config['supported_methods'] = $supportedMethods;
-                    }
+                    $config = self::normalizeConfig($requestConfig);
                     
                     Log::info('✓ Config reconstruido en SAVING:', $config);
                     
-                    // ESTABLECER directamente en attributes (sin pasar por el mutator)
-                    $model->attributes['config'] = json_encode($config, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-                    Log::info('✓ Config guardado como JSON en attributes');
+                    // DEJAR QUE LARAVEL MANEJE LA CODIFICACIÓN CON EL CAST
+                    // El cast 'array' se encargará de json_encode automáticamente
+                    $model->config = $config;
+                    Log::info('✓ Config asignado como array al modelo');
                 }
             }
             
             Log::info('Atributos finales a guardar:', [
-                'config_tipo' => gettype($model->attributes['config'] ?? null),
-                'config_preview' => substr(json_encode($model->attributes['config'] ?? null), 0, 150)
+                'config_tipo' => gettype($model->config),
+                'config_preview' => substr(json_encode($model->config ?? []), 0, 150)
             ]);
         });
 
         static::saved(function ($model) {
             Log::info('==== MODEL EVENTO: SAVED ====');
-            Log::info('Config guardado en BD:', ['config' => $model->config]);
+            Log::info('Config guardado en BD:', ['config' => $model->fresh()->config]);
         });
     }
 
     /**
-     * Obtener el config como array (cast automático)
+     * Normalizar el config para tener tipos de datos correctos
      */
-    public function getConfigAttribute($value)
+    public static function normalizeConfig(array $config): array
     {
-        if (is_string($value)) {
-            return json_decode($value, true) ?? [];
+        $normalized = [];
+        $booleanFields = self::$booleanConfigFields;
+        
+        foreach ($config as $key => $value) {
+            // Convertir a booleano solo los campos específicos que lo requieren
+            if (in_array($key, $booleanFields)) {
+                $normalized[$key] = $value === '1' || $value === 'on' || $value === true;
+            } else {
+                // Para otros campos, mantener como están (strings, números, etc.)
+                // Pero vaciar valores vacíos que no sean booleananos
+                $normalized[$key] = $value ?? '';
+            }
+            Log::debug("  Campo '$key': " . var_export($normalized[$key], true));
         }
-        return is_array($value) ? $value : [];
+        
+        // Construir supported_methods
+        $supportedMethods = [];
+        if ($normalized['supports_redirect'] ?? false) $supportedMethods[] = 'redirect';
+        if ($normalized['supports_qr'] ?? false) $supportedMethods[] = 'qr';
+        if ($normalized['supports_terminal'] ?? false) $supportedMethods[] = 'terminal';
+        
+        if (!empty($supportedMethods)) {
+            $normalized['supported_methods'] = $supportedMethods;
+        } else {
+            // Si no hay métodos soportados, remover la clave
+            unset($normalized['supported_methods']);
+        }
+        
+        return $normalized;
     }
+
+
 
     /**
      * Relación con los tickets de pago

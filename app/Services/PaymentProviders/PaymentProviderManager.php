@@ -2,6 +2,7 @@
 
 namespace App\Services\PaymentProviders;
 
+use App\Models\Order;
 use App\Models\PaymentProvider;
 use App\Models\PaymentProviderTicket;
 use App\Models\Ticket;
@@ -87,11 +88,29 @@ class PaymentProviderManager
             throw new \Exception("Payment provider is inactive");
         }
 
+        // PASO 0: Obtener o generar idempotency_key
+        // Buscar si existe un payment_provider_ticket anterior en esta orden
+        $previousPayment = $order->paymentProviderTickets()
+            ->latest()
+            ->first();
+        
+        $idempotencyKey = $previousPayment?->response_data['idempotency_key'] ?? \Illuminate\Support\Str::uuid()->toString();
+        
+        Log::info('Order payment: idempotency_key', [
+            'order_id' => $order->id,
+            'idempotency_key' => $idempotencyKey,
+            'reusing_from_previous' => $previousPayment ? true : false,
+        ]);
+
         // Crear PaymentProviderTicket vinculada a la orden (sin ticket individual pre-existente)
         $paymentTicketData = [
             'order_id' => $order->id,
             'payment_provider_id' => $provider->id,
             'status' => 'pending',
+            'response_data' => [
+                'idempotency_key' => $idempotencyKey,
+                'created_at' => now()->toIso8601String(),
+            ],
             // No ticket_id en este flujo order-first
         ];
         
@@ -102,13 +121,16 @@ class PaymentProviderManager
             'order_number' => $order->order_number,
             'payment_ticket_id' => $paymentTicket->id,
             'provider_id' => $providerId,
+            'payment_method' => $additionalData['payment_method'] ?? 'redirect',
+            'idempotency_key' => $idempotencyKey,
         ]);
 
         try {
-            // Obtener handler y procesar pago
-            $handler = $this->getHandler($provider);
+            // PASO 1: Seleccionar handler según el método de pago
+            $paymentMethod = $additionalData['payment_method'] ?? 'redirect';
+            $handler = $this->getHandlerForMethod($provider, $paymentMethod);
             
-            // Pasar información de la orden en place of ticket
+            // PASO 2: Enriquecer data con información de la orden
             $enrichedData = array_merge($additionalData, [
                 'order_id' => $order->id,
                 'order_number' => $order->order_number,
@@ -116,16 +138,17 @@ class PaymentProviderManager
                 'customer_name' => $order->customer_name,
                 'total_amount' => $order->total_amount,
                 'total_price' => $order->total_amount,
+                'idempotency_key' => $idempotencyKey,
             ]);
             
-            // NOTA: Algunos handlers pueden esperar un Ticket. En ese caso,
-            // se puede crear un "dummy ticket" temporal o adaptar el handler.
-            // Por ahora usamos un approach directo pasando datos.
-            $result = $handler->processOrderPayment($paymentTicket, $enrichedData);
+            // PASO 3: ORDER-FIRST: processPayment recibe PaymentProviderTicket con order_id (sin ticket_id)
+            // El handler obtendrá screening desde la orden
+            $result = $handler->processPayment($paymentTicket, $enrichedData);
 
             if (!($result['success'] ?? false)) {
                 Log::warning('Order payment initiation failed', [
                     'order_id' => $order->id,
+                    'payment_method' => $paymentMethod,
                     'result' => $result,
                 ]);
                 $paymentTicket->delete();
@@ -134,6 +157,7 @@ class PaymentProviderManager
 
             Log::info('Order payment initiated successfully', [
                 'order_id' => $order->id,
+                'payment_method' => $paymentMethod,
                 'payment_ticket_id' => $paymentTicket->id,
                 'transaction_id' => $result['transaction_id'] ?? 'N/A',
             ]);
@@ -301,14 +325,57 @@ class PaymentProviderManager
 
     /**
      * Obtener el handler correcto para un método específico
+     * 
+     * Mapeo:
+     * - redirect -> mercado_pago (o provider de redirect)
+     * - qr -> mercado_pago_qr
+     * - terminal -> mercado_pago_terminal (Point)
      */
-    protected function getHandlerForMethod(PaymentProvider $provider, string $paymentMethod): PaymentProviderHandler
+    protected function getHandlerForMethod(PaymentProvider $provider, string $paymentMethod = 'redirect'): PaymentProviderHandler
     {
-        return match($paymentMethod) {
-            'qr' => new MercadoPagoQrHandler($provider),
-            'terminal' => new MercadoPagoPointHandler($provider),
-            default => $this->getHandler($provider), // redirect o manual
-        };
+        // Si el provider es específico (mercado_pago_qr, etc), usar directamente
+        if (in_array($provider->name, ['mercado_pago_qr', 'mercado_pago_terminal', 'paypal', 'cash'])) {
+            return $this->getHandler($provider);
+        }
+
+        // Si el provider es genérico (mercado_pago), seleccionar según el method
+        if ($provider->name === 'mercado_pago') {
+            $providerName = match($paymentMethod) {
+                'qr' => 'mercado_pago_qr',
+                'terminal' => 'mercado_pago_terminal',
+                default => 'mercado_pago', // redirect
+            };
+
+            // Primero, intentar buscar un provider específico en BD
+            $specificProvider = PaymentProvider::where('name', $providerName)
+                ->where('is_active', true)
+                ->first();
+
+            if ($specificProvider) {
+                Log::debug("Using specific payment provider from DB", [
+                    'original_provider' => $provider->name,
+                    'specific_provider' => $providerName,
+                    'payment_method' => $paymentMethod,
+                ]);
+                return $this->getHandler($specificProvider);
+            }
+
+            // Si no existe provider específico en BD, instanciar el handler directamente
+            Log::debug("No specific provider in DB, using handler directly", [
+                'original_provider' => $provider->name,
+                'requested_handler' => $providerName,
+                'payment_method' => $paymentMethod,
+            ]);
+
+            return match($paymentMethod) {
+                'qr' => new MercadoPagoQrHandler($provider),
+                'terminal' => new MercadoPagoPointHandler($provider),
+                default => new MercadoPagoHandler($provider),
+            };
+        }
+
+        // Para otros providers, usar el handler default
+        return $this->getHandler($provider);
     }
 
     /**

@@ -4,11 +4,13 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class MpTerminalOrder extends Model
 {
     protected $table = 'mp_terminal_orders';
+
+    // Desactivar updated_at ya que la tabla solo tiene created_at, last_checked_at, cancelled_at
+    public $timestamps = false;
 
     protected $fillable = [
         'payment_provider_id',

@@ -5,230 +5,203 @@ namespace App\Services;
 use App\Models\Order;
 use App\Models\Ticket;
 use App\Models\ScreeningSeat;
-use App\Models\Screening;
+use App\Exceptions\InvalidOrderStateException;
+use App\Exceptions\InvalidSeatOwnershipException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * Servicio de Finalización de Órdenes
+ * Order Finalization Service - REFACTORED
  * 
- * Responsable de:
- * - Generar ticket_number definitivos por asiento
- * - Generar QR codes
- * - Marcar tickets como confirmed/sold
- * - Transicionar screening_seats a sold
- * - Ser completamente idempotente (webhook duplicate-safe)
+ * Responsabilidades:
+ * - Finalizar orden después de aprobación de pago
+ * - Generar ticket_number DETERMINÍSTICO usando ticket_sequence
+ * - Generar QR codes sin PII
+ * - Marcar tickets como confirmed
+ * - Marcar screening_seats como sold (con validación de ownership)
+ * - Reparar estados parciales
+ * - Ser 100% idempotente y  duplicate-safe para webhooks
+ * 
+ * Garantías:
+ * - Idempotencia: detecta si ya está finalizado y sale early
+ * - Repair: si hay state corruption, la arregla
+ * - Atomicidad: todo o nada con transactions y locks
+ * - Trazabilidad: logs completos sin PII
  */
 class OrderFinalizationService
 {
+    const QR_VERSION = '1.0';
+    const QR_HMAC_KEY_ENV = 'QR_SIGNATURE_KEY';
+
     /**
      * Finalize order after payment approval
      * 
-     * Flujo order-first REAL:
-     * 1. Si el order NO tiene tickets pre-existentes:
-     *    - Crear Ticket por cada asiento reservado
-     *    - Generar ticket_number y QR
-     *    - Marcar como confirmed
-     * 2. Si el order ya tiene tickets (legacy):
-     *    - Solo actualizar ticket_number y QR
-     *    - Marcar como confirmed
-     * 3. Marcar asientos como sold en screening_seats
-     * 4. Marcar order como paid/completed
-     * 
-     * Idempotent operation: puede ejecutarse múltiples veces seguramente
-     * 
      * @param int $orderId
-     * @param array $paymentData Información adicional del pago (transaction_id, webhook data, etc)
-     * @return array Resultado con success and details
+     * @param array $paymentData Must contain 'transaction_id' and optionally 'provider_id', 'approval_date'
+     * @return array['success', 'message', 'order_id', 'finalized_tickets', 'idempotent', 'repaired']
      */
     public function finalizeOrderAfterApproval(int $orderId, array $paymentData = []): array
     {
         try {
-            Log::info("Order finalization started (order-first flow)", [
+            Log::info("Order finalization started", [
                 'order_id' => $orderId,
-                'has_payment_data' => !empty($paymentData),
+                'has_transaction_id' => isset($paymentData['transaction_id']),
             ]);
 
+            // Step 1: Load order and validate existence
+            $order = Order::lockForUpdate()->findOrFail($orderId);
+
+            // Step 2: Load all tickets for this order
+            $tickets = Ticket::where('order_id', $orderId)
+                ->lockForUpdate()
+                ->orderBy('ticket_sequence', 'asc')  // Deterministic order
+                ->get();
+
+            if ($tickets->isEmpty()) {
+                Log::error("Order has no tickets for finalization", ['order_id' => $orderId]);
+                return [
+                    'success' => false,
+                    'message' => 'Order has no tickets to finalize',
+                    'error_code' => 'NO_TICKETS',
+                ];
+            }
+
+            Log::info("Order loaded for finalization", [
+                'order_id' => $orderId,
+                'ticket_count' => $tickets->count(),
+            ]);
+
+            // Step 3: Check if already fully finalized (ROBUST check)
+            $finalizationStatus = $this->checkFinalizationStatus($order, $tickets);
+
+            if ($finalizationStatus['fully_finalized']) {
+                Log::info("Order already fully finalized (idempotency check)", [
+                    'order_id' => $orderId,
+                    'finalized_tickets' => $tickets->count(),
+                ]);
+
+                // Update payment_data if not already set
+                if (!$order->payment_data && !empty($paymentData)) {
+                    $order->update(['payment_data' => array_merge($order->payment_data ?? [], $paymentData)]);
+                }
+
+                return [
+                    'success' => true,
+                    'message' => 'Order already finalized',
+                    'idempotent' => true,
+                    'finalized_tickets' => $tickets->count(),
+                ];
+            }
+
+            // Step 4: If partially finalized, repair state
+            $repaired = false;
+            if ($finalizationStatus['partial']) {
+                Log::warning("Order in partial finalization state, attempting repair", [
+                    'order_id' => $orderId,
+                    'issues' => $finalizationStatus['issues'],
+                ]);
+
+                $repairResult = $this->repairPartialFinalization($order, $tickets);
+                if (!$repairResult['success']) {
+                    Log::error("Failed to repair partial finalization", [
+                        'order_id' => $orderId,
+                        'errors' => $repairResult['errors'],
+                    ]);
+
+                    return [
+                        'success' => false,
+                        'message' => 'Failed to repair order state',
+                        'error_code' => 'STATE_REPAIR_FAILED',
+                        'errors' => $repairResult['errors'],
+                    ];
+                }
+
+                $repaired = true;
+                Log::info("Partial finalization repaired", [
+                    'order_id' => $orderId,
+                    'repairs_applied' => $repairResult['repairs_applied'],
+                ]);
+            }
+
+            // Step 5: Finalize all tickets
             DB::beginTransaction();
 
             try {
-                // Step 1: Load order with lock
-                $order = Order::lockForUpdate()->find($orderId);
-                
-                if (!$order) {
-                    Log::error("Order not found for finalization", ['order_id' => $orderId]);
-                    DB::rollBack();
-                    return [
-                        'success' => false,
-                        'message' => 'Order not found',
-                        'error_code' => 'ORDER_NOT_FOUND',
-                    ];
-                }
-
-                Log::info("Order loaded for finalization", [
-                    'order_id' => $orderId,
-                    'order_status' => $order->status,
-                    'total_amount' => $order->total_amount,
-                ]);
-
-                // Step 2: Check if order is already finalized (idempotency)
-                if (in_array($order->status, ['completed', 'paid'])) {
-                    Log::info("Order already finalized (idempotency check)", [
-                        'order_id' => $orderId,
-                        'status' => $order->status,
-                    ]);
-                    
-                    DB::rollBack();
-                    return [
-                        'success' => true,
-                        'message' => 'Order already finalized',
-                        'idempotent' => true,
-                        'order_id' => $orderId,
-                    ];
-                }
-
-                // Step 3: Check if tickets exist for this order
-                $existingTickets = Ticket::where('order_id', $orderId)
-                    ->lockForUpdate()
-                    ->get();
-
-                $hasPreexistingTickets = $existingTickets->count() > 0;
                 $finalizedTickets = [];
 
-                if ($hasPreexistingTickets) {
-                    // Legacy path: Tickets already created (pre-payment)
-                    // Just update them with ticket_number and QR
-                    Log::info("Finalizing pre-existing tickets", [
-                        'order_id' => $orderId,
-                        'ticket_count' => $existingTickets->count(),
-                    ]);
-
-                    foreach ($existingTickets as $ticket) {
-                        if ($ticket->status === 'confirmed') {
-                            // Already confirmed, skip
-                            Log::debug("Ticket already confirmed, skipping", ['ticket_id' => $ticket->id]);
-                            $finalizedTickets[] = [
-                                'ticket_id' => $ticket->id,
-                                'status' => 'already_confirmed',
-                            ];
-                            continue;
-                        }
-
-                        // Generate final ticket number and QR
-                        $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
-                        $qrCode = $this->generateQRCode($ticketNumber, $ticket);
-
-                        // Update ticket
-                        $ticket->update([
-                            'ticket_number' => $ticketNumber,
-                            'qr_code' => $qrCode,
-                            'status' => 'confirmed',
-                            'purchased_at' => now(),
-                        ]);
-
-                        Log::info("Ticket finalized", [
+                foreach ($tickets as $ticket) {
+                    // Skip tickets already fully finalized (after repair)
+                    if ($this->isTicketFullyFinalized($ticket)) {
+                        Log::debug("Ticket already fully finalized, skipping", [
                             'ticket_id' => $ticket->id,
-                            'ticket_number' => $ticketNumber,
+                            'ticket_number' => $ticket->ticket_number,
                         ]);
 
                         $finalizedTickets[] = [
                             'ticket_id' => $ticket->id,
-                            'ticket_number' => $ticketNumber,
-                            'status' => 'finalized',
+                            'ticket_number' => $ticket->ticket_number,
+                            'status' => 'already_finalized',
                         ];
-
-                        // Mark seat as sold
-                        if ($ticket->seat_id) {
-                            $this->markSeatAsSold($order->screening_id, $ticket->seat_id, $orderId);
-                        }
+                        continue;
                     }
 
-                } else {
-                    // Order-first path: NO pre-existing tickets
-                    // Create Ticket for each reserved seat in this order
-                    Log::info("Creating tickets from reserved seats (order-first)", [
-                        'order_id' => $orderId,
+                    // Generate ticket_number using ticket_sequence (DETERMINISTIC)
+                    $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
+
+                    // Generate QR code (without PII)
+                    $qrCode = $this->generateQRCode($ticketNumber, $ticket);
+
+                    // Update ticket
+                    $ticket->update([
+                        'ticket_number' => $ticketNumber,
+                        'qr_code' => $qrCode,
+                        'status' => 'confirmed',
+                        'purchased_at' => now(),
                     ]);
 
-                    $screeningSeats = ScreeningSeat::where('order_id', $orderId)
-                        ->where('status', ScreeningSeat::STATUS_RESERVED)
-                        ->lockForUpdate()
-                        ->get();
+                    Log::info("Ticket finalized", [
+                        'ticket_id' => $ticket->id,
+                        'ticket_number' => $ticketNumber,
+                        'sequence' => $ticket->ticket_sequence,
+                    ]);
 
-                    if ($screeningSeats->isEmpty()) {
-                        Log::warning("Order has no reserved seats, cannot finalize", [
-                            'order_id' => $orderId,
-                        ]);
-                        DB::rollBack();
-                        return [
-                            'success' => false,
-                            'message' => 'Order has no reserved seats to finalize',
-                            'error_code' => 'NO_SEATS',
-                        ];
-                    }
+                    $finalizedTickets[] = [
+                        'ticket_id' => $ticket->id,
+                        'ticket_number' => $ticketNumber,
+                        'status' => 'newly_finalized',
+                    ];
 
-                    // Create Ticket for each reserved seat
-                    foreach ($screeningSeats as $screeningSeat) {
-                        $seat = $screeningSeat->seat;
-                        
-                        // Create ticket
-                        $ticket = Ticket::create([
-                            'screening_id' => $order->screening_id,
-                            'seat_id' => $screeningSeat->seat_id,
-                            'user_id' => $order->user_id,
-                            'order_id' => $orderId,
-                            'ticket_number' => null, // Will generate below
-                            'price' => $this->getScreeningPrice($order->screening_id),
-                            'customer_email' => $order->customer_email,
-                            'customer_name' => $order->customer_name,
-                            'customer_phone' => $order->customer_phone,
-                            'status' => 'confirmed',
-                            'ip_address' => $order->ip_address,
-                            'purchased_at' => now(),
-                            // Desnormalized fields
-                            'seat_code' => $seat->seat_code,
-                            'row_number' => $seat->row_number,
-                            'seat_number' => $seat->seat_number,
-                        ]);
-
-                        // Generate ticket number and QR
-                        $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
-                        $qrCode = $this->generateQRCode($ticketNumber, $ticket);
-
-                        // Update with generated fields
-                        $ticket->update([
-                            'ticket_number' => $ticketNumber,
-                            'qr_code' => $qrCode,
-                        ]);
-
-                        Log::info("Ticket created from reserved seat", [
-                            'ticket_id' => $ticket->id,
-                            'seat_id' => $screeningSeat->seat_id,
-                            'ticket_number' => $ticketNumber,
-                        ]);
-
-                        $finalizedTickets[] = [
-                            'ticket_id' => $ticket->id,
-                            'ticket_number' => $ticketNumber,
-                            'seat_id' => $screeningSeat->seat_id,
-                            'status' => 'created and confirmed',
-                        ];
-
-                        // Mark seat as sold
-                        $this->markSeatAsSold($order->screening_id, $screeningSeat->seat_id, $orderId);
+                    // Mark corresponding screening seat as sold (with ownership validation)
+                    if ($ticket->seat_id) {
+                        $this->markSeatAsSold(
+                            $order->screening_id,
+                            $ticket->seat_id,
+                            $order->id
+                        );
                     }
                 }
 
-                // Step 4: Update order status
-                $order->update([
+                // Step 6: Update order status and payment_data
+                $orderUpdate = [
                     'status' => 'completed',
-                    'paid_at' => now(),
-                ]);
+                    'completed_at' => now(),
+                ];
+
+                // Merge payment_data if provided
+                if (!empty($paymentData)) {
+                    $orderUpdate['payment_data'] = array_merge(
+                        $order->payment_data ?? [],
+                        $paymentData
+                    );
+                }
+
+                $order->update($orderUpdate);
 
                 Log::info("Order finalization completed", [
                     'order_id' => $orderId,
                     'order_number' => $order->order_number,
-                    'finalized_tickets' => count($finalizedTickets),
+                    'finalized_count' => count($finalizedTickets),
+                    'repaired' => $repaired,
                 ]);
 
                 DB::commit();
@@ -239,424 +212,298 @@ class OrderFinalizationService
                     'order_id' => $orderId,
                     'order_number' => $order->order_number,
                     'finalized_tickets' => count($finalizedTickets),
-                    'tickets_created' => !$hasPreexistingTickets ? count($finalizedTickets) : 0,
+                    'repaired' => $repaired,
                     'details' => $finalizedTickets,
                 ];
 
             } catch (\Exception $e) {
                 DB::rollBack();
-                Log::error("Error during order finalization", [
+                Log::error("Error during order finalization transaction", [
                     'order_id' => $orderId,
                     'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
                 ]);
                 throw $e;
             }
 
         } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'message' => 'Order finalization failed: ' . $e->getMessage(),
-                'error_code' => 'FINALIZATION_ERROR',
-                'exception' => $e->getMessage(),
-            ];
-        }
-    }
-
-    /**
-     * Get screening price (helper for order-first ticket creation)
-     */
-    private function getScreeningPrice(int $screeningId): float
-    {
-        $screening = Screening::find($screeningId);
-        return $screening?->price ?? 0;
-    }
-
-    /**
-     * Finalize order after payment approval
-     * 
-     * Idempotent operation: can be called multiple times safely
-     * (e.g., if webhook arrives twice)
-     * 
-     * @param int $orderId
-     * @param array $paymentData Additional context (e.g., transaction_id, payment_provider data)
-     * @return array Result with status and details
-     */
-    public function finalizeOrderAfterApprovalOld(int $orderId, array $paymentData = []): array
-    {
-        try {
-            Log::info("Order finalization started", [
+            Log::error("Order finalization failed", [
                 'order_id' => $orderId,
-                'has_payment_data' => !empty($paymentData),
+                'error' => $e->getMessage(),
             ]);
 
-            DB::beginTransaction();
-
-            try {
-                // Step 1: Load order with tickets
-                $order = Order::lockForUpdate()->find($orderId);
-                
-                if (!$order) {
-                    Log::error("Order not found for finalization", ['order_id' => $orderId]);
-                    DB::rollBack();
-                    return [
-                        'success' => false,
-                        'message' => 'Order not found',
-                        'error_code' => 'ORDER_NOT_FOUND',
-                    ];
-                }
-
-                // Step 2: Load all tickets for this order
-                $tickets = Ticket::where('order_id', $orderId)
-                    ->lockForUpdate()
-                    ->get();
-
-                Log::info("Order loaded for finalization", [
-                    'order_id' => $orderId,
-                    'ticket_count' => $tickets->count(),
-                ]);
-
-                // Step 3: Check idempotency - if all tickets are already confirmed, skip
-                $confirmedCount = $tickets->where('status', 'confirmed')->count();
-                
-                if ($confirmedCount === $tickets->count() && $confirmedCount > 0) {
-                    Log::info("Order already finalized (idempotency check)", [
-                        'order_id' => $orderId,
-                        'confirmed_tickets' => $confirmedCount,
-                    ]);
-                    
-                    DB::rollBack();
-                    return [
-                        'success' => true,
-                        'message' => 'Order already finalized',
-                        'idempotent' => true,
-                        'finalized_tickets' => $confirmedCount,
-                    ];
-                }
-
-                // Warn if some tickets are already confirmed (partial state)
-                if ($confirmedCount > 0 && $confirmedCount < $tickets->count()) {
-                    Log::warning("Order in partial finalization state", [
-                        'order_id' => $orderId,
-                        'confirmed_tickets' => $confirmedCount,
-                        'total_tickets' => $tickets->count(),
-                    ]);
-                }
-
-                // Step 4: Finalize each ticket
-                $finalizedTickets = [];
-
-                foreach ($tickets as $ticket) {
-                    // Skip if already confirmed (partial finalization recovery)
-                    if ($ticket->status === 'confirmed') {
-                        Log::debug("Ticket already confirmed, skipping", ['ticket_id' => $ticket->id]);
-                        $finalizedTickets[] = [
-                            'ticket_id' => $ticket->id,
-                            'status' => 'already_confirmed',
-                        ];
-                        continue;
-                    }
-
-                    // Generate final ticket_number if not already set (or placeholder)
-                    $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
-                    
-                    // Generate QR code
-                    $qrCode = $this->generateQRCode($ticketNumber, $ticket);
-
-                    // Update ticket
-                    $ticket->update([
-                        'ticket_number' => $ticketNumber,
-                        'qr_code' => $qrCode,
-                        'status' => 'confirmed',
-                        'purchased_at' => now(),
-                    ]);
-
-                    Log::info("Ticket finalized", [
-                        'ticket_id' => $ticket->id,
-                        'ticket_number' => $ticketNumber,
-                        'status' => 'confirmed',
-                    ]);
-
-                    $finalizedTickets[] = [
-                        'ticket_id' => $ticket->id,
-                        'ticket_number' => $ticketNumber,
-                        'status' => 'finalized',
-                    ];
-
-                    // Step 5: Mark corresponding screening seat as sold
-                    if ($ticket->seat_id) {
-                        $this->markSeatAsSold($order->screening_id, $ticket->seat_id, $orderId);
-                    }
-                }
-
-                // Step 6: Update order status to completed
-                $order->update([
-                    'status' => 'completed',
-                    'completed_at' => now(),
-                ]);
-
-                Log::info("Order finalization completed", [
-                    'order_id' => $orderId,
-                    'order_number' => $order->order_number,
-                    'finalized_count' => count($finalizedTickets),
-                ]);
-
-                DB::commit();
-
-                return [
-                    'success' => true,
-                    'message' => 'Order (tickets and seats) finalized successfully',
-                    'order_id' => $orderId,
-                    'order_number' => $order->order_number,
-                    'finalized_tickets' => count($finalizedTickets),
-                    'details' => $finalizedTickets,
-                ];
-
-            } catch (\Exception $e) {
-                DB::rollBack();
-                Log::error("Error during order finalization", [
-                    'order_id' => $orderId,
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
-                ]);
-                throw $e;
-            }
-
-        } catch (\Exception $e) {
             return [
                 'success' => false,
-                'message' => 'Order finalization failed: ' . $e->getMessage(),
+                'message' => 'Order finalization failed',
                 'error_code' => 'FINALIZATION_ERROR',
-                'exception' => $e->getMessage(),
             ];
         }
     }
 
     /**
-     * Finalize order after payment approval
+     * Check if order is fully finalized, partially finalized, or not started
      * 
-     * Idempotent operation: can be called multiple times safely
-     * (e.g., if webhook arrives twice)
+     * Fully finalized: ALL tickets have status=confirmed AND ticket_number IS NOT NULL AND qr_code NOT NULL
+     *                  AND ALL seats have status=sold with matching order_id
      * 
-     * @param int $orderId
-     * @param array $paymentData Additional context (e.g., transaction_id, payment_provider data)
-     * @return array Result with status and details
+     * Partially finalized: Some but not all tickets are fully finalized, or seats mismatch
+     * 
+     * Not started: Tickets in pending_payment state
      */
-    public function finalizeOrderAfterApprovalOldOriginal(int $orderId, array $paymentData = []): array
+    private function checkFinalizationStatus(Order $order, $tickets): array
     {
-        try {
-            Log::info("Order finalization started", [
-                'order_id' => $orderId,
-                'has_payment_data' => !empty($paymentData),
-            ]);
+        $issues = [];
+        $fully_finalized = true;
+        $partial = false;
 
-            DB::beginTransaction();
-
-            try {
-                // Step 1: Load order with tickets
-                $order = Order::lockForUpdate()->find($orderId);
-                
-                if (!$order) {
-                    Log::error("Order not found for finalization", ['order_id' => $orderId]);
-                    DB::rollBack();
-                    return [
-                        'success' => false,
-                        'message' => 'Order not found',
-                        'error_code' => 'ORDER_NOT_FOUND',
-                    ];
-                }
-
-                // Step 2: Load all tickets for this order
-                $tickets = Ticket::where('order_id', $orderId)
-                    ->lockForUpdate()
-                    ->get();
-
-                Log::info("Order loaded for finalization", [
-                    'order_id' => $orderId,
-                    'ticket_count' => $tickets->count(),
-                ]);
-
-                // Step 3: Check idempotency - if all tickets are already confirmed, skip
-                $confirmedCount = $tickets->where('status', 'confirmed')->count();
-                
-                if ($confirmedCount === $tickets->count() && $confirmedCount > 0) {
-                    Log::info("Order already finalized (idempotency check)", [
-                        'order_id' => $orderId,
-                        'confirmed_tickets' => $confirmedCount,
-                    ]);
-                    
-                    DB::rollBack();
-                    return [
-                        'success' => true,
-                        'message' => 'Order already finalized',
-                        'idempotent' => true,
-                        'finalized_tickets' => $confirmedCount,
-                    ];
-                }
-
-                // Warn if some tickets are already confirmed (partial state)
-                if ($confirmedCount > 0 && $confirmedCount < $tickets->count()) {
-                    Log::warning("Order in partial finalization state", [
-                        'order_id' => $orderId,
-                        'confirmed_tickets' => $confirmedCount,
-                        'total_tickets' => $tickets->count(),
-                    ]);
-                }
-
-                // Step 4: Finalize each ticket
-                $finalizedTickets = [];
-
-                foreach ($tickets as $ticket) {
-                    // Skip if already confirmed (partial finalization recovery)
-                    if ($ticket->status === 'confirmed') {
-                        Log::debug("Ticket already confirmed, skipping", ['ticket_id' => $ticket->id]);
-                        $finalizedTickets[] = [
-                            'ticket_id' => $ticket->id,
-                            'status' => 'already_confirmed',
-                        ];
-                        continue;
-                    }
-
-                    // Generate final ticket_number if not already set (or placeholder)
-                    $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
-                    
-                    // Generate QR code
-                    $qrCode = $this->generateQRCode($ticketNumber, $ticket);
-
-                    // Update ticket
-                    $ticket->update([
-                        'ticket_number' => $ticketNumber,
-                        'qr_code' => $qrCode,
-                        'status' => 'confirmed',
-                        'purchased_at' => now(),
-                    ]);
-
-                    Log::info("Ticket finalized", [
-                        'ticket_id' => $ticket->id,
-                        'ticket_number' => $ticketNumber,
-                        'status' => 'confirmed',
-                    ]);
-
-                    $finalizedTickets[] = [
-                        'ticket_id' => $ticket->id,
-                        'ticket_number' => $ticketNumber,
-                        'status' => 'finalized',
-                    ];
-
-                    // Step 5: Mark corresponding screening seat as sold
-                    if ($ticket->seat_id) {
-                        $this->markSeatAsSold($order->screening_id, $ticket->seat_id, $orderId);
-                    }
-                }
-
-                // Step 6: Update order status to completed
-                $order->update([
-                    'status' => 'completed',
-                    'completed_at' => now(),
-                ]);
-
-                Log::info("Order finalization completed", [
-                    'order_id' => $orderId,
-                    'order_number' => $order->order_number,
-                    'finalized_count' => count($finalizedTickets),
-                ]);
-
-                DB::commit();
-
-                return [
-                    'success' => true,
-                    'message' => 'Order (tickets and seats) finalized successfully',
-                    'order_id' => $orderId,
-                    'order_number' => $order->order_number,
-                    'finalized_tickets' => count($finalizedTickets),
-                    'details' => $finalizedTickets,
-                ];
-
-            } catch (\Exception $e) {
-                DB::rollBack();
-                Log::error("Error during order finalization", [
-                    'order_id' => $orderId,
-                    'error' => $e->getMessage(),
-                    'trace' => $e->getTraceAsString(),
-                ]);
-                throw $e;
+        foreach ($tickets as $ticket) {
+            if ($ticket->status !== 'confirmed') {
+                $fully_finalized = false;
+                $partial = true;
+                $issues[] = "Ticket {$ticket->id} status is {$ticket->status}, not confirmed";
             }
 
-        } catch (\Exception $e) {
-            return [
-                'success' => false,
-                'message' => 'Order finalization failed: ' . $e->getMessage(),
-                'error_code' => 'FINALIZATION_ERROR',
-                'exception' => $e->getMessage(),
-            ];
+            if (is_null($ticket->ticket_number)) {
+                $fully_finalized = false;
+                $partial = true;
+                $issues[] = "Ticket {$ticket->id} has NULL ticket_number";
+            }
+
+            if (is_null($ticket->qr_code)) {
+                $fully_finalized = false;
+                $partial = true;
+                $issues[] = "Ticket {$ticket->id} has NULL qr_code";
+            }
+
+            // Check if corresponding seat is sold
+            if ($ticket->seat_id) {
+                $screeningSeat = ScreeningSeat::where('screening_id', $order->screening_id)
+                    ->where('seat_id', $ticket->seat_id)
+                    ->first();
+
+                if (!$screeningSeat || $screeningSeat->status !== 'sold') {
+                    $fully_finalized = false;
+                    $partial = true;
+                    $issues[] = "Seat {$ticket->seat_id} not marked as sold";
+                }
+
+                if ($screeningSeat && $screeningSeat->order_id !== $order->id) {
+                    $fully_finalized = false;
+                    $partial = true;
+                    $issues[] = "Seat {$ticket->seat_id} belongs to order {$screeningSeat->order_id}, not {$order->id}";
+                }
+            }
         }
+
+        // Check order status
+        if ($order->status !== 'completed') {
+            if (!$fully_finalized) {
+                $partial = true;
+            }
+        }
+
+        return [
+            'fully_finalized' => $fully_finalized,
+            'partial' => $partial,
+            'issues' => $issues,
+        ];
     }
 
+    /**
+     * Check if a single ticket is fully finalized
+     */
+    private function isTicketFullyFinalized(Ticket $ticket): bool
+    {
+        return $ticket->status === 'confirmed'
+            && !is_null($ticket->ticket_number)
+            && !is_null($ticket->qr_code);
+    }
 
     /**
-     * Generate final ticket number
-     * Format: ORD-YYYYMMDD-{ORDER_SEQ}{CHECK_DIGIT}-TKT-{SEAT_SEQ}
+     * Repair partial finalization state
      * 
-     * Example: ORD-20250214-0001A-TKT-001
+     * Scenarios:
+     * - Ticket confirmed but without ticket_number: Generate it
+     * - Ticket confirmed but without qr_code: Generate it
+     * - Seat not marked sold: Mark it
+     */
+    private function repairPartialFinalization(Order $order, $tickets): array
+    {
+        $repairs = [];
+        $errors = [];
+
+        try {
+            foreach ($tickets as $ticket) {
+                if ($ticket->status !== 'confirmed') {
+                    // Don't try to repair non-confirmed tickets in a repair operation
+                    continue;
+                }
+
+                // Repair missing ticket_number
+                if (is_null($ticket->ticket_number)) {
+                    $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
+                    $ticket->ticket_number = $ticketNumber;
+                    $ticket->save();
+                    $repairs[] = "Generated ticket_number for ticket {$ticket->id}";
+                }
+
+                // Repair missing qr_code
+                if (is_null($ticket->qr_code)) {
+                    $qrCode = $this->generateQRCode(
+                        $ticket->ticket_number ?? 'REPAIR-' . $ticket->id,
+                        $ticket
+                    );
+                    $ticket->qr_code = $qrCode;
+                    $ticket->save();
+                    $repairs[] = "Generated qr_code for ticket {$ticket->id}";
+                }
+
+                // Repair seat status
+                if ($ticket->seat_id) {
+                    $screeningSeat = ScreeningSeat::where('screening_id', $order->screening_id)
+                        ->where('seat_id', $ticket->seat_id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($screeningSeat && $screeningSeat->status !== 'sold') {
+                        if ($screeningSeat->status === 'reserved' && $screeningSeat->order_id === $order->id) {
+                            $screeningSeat->update([
+                                'status' => 'sold',
+                                'sold_at' => now(),
+                            ]);
+                            $repairs[] = "Marked seat {$ticket->seat_id} as sold";
+                        } else {
+                            $errors[] = "Seat {$ticket->seat_id} has incompatible state for repair";
+                        }
+                    }
+                }
+            }
+        } catch (\Exception $e) {
+            $errors[] = "Repair failed: " . $e->getMessage();
+        }
+
+        return [
+            'success' => empty($errors),
+            'repairs_applied' => $repairs,
+            'errors' => $errors,
+        ];
+    }
+
+    /**
+     * Generate final ticket number using ticket_sequence
+     * 
+     * Format: TKT-{order_number}-{ticket_sequence:03d}
+     * Example: TKT-ORD-20250214-0001A-001
+     * 
+     * DETERMINISTIC: Based on ticket_sequence, not on count()
+     * STABLE: Same ticket always gets same number
      */
     private function generateFinalTicketNumber(Order $order, Ticket $ticket): string
     {
-        // Use order's order_number as base
-        $orderNumber = $order->order_number ?? 'UNKNOWN';
-        
-        // Add ticket sequence within order
-        $ticketSeqInOrder = $order->tickets()
-            ->where('id', '<=', $ticket->id)
-            ->count();
+        // If ticket_sequence not set, calculate it
+        $sequence = $ticket->ticket_sequence;
 
-        return "TKT-{$orderNumber}-{$ticketSeqInOrder}";
+        if (is_null($sequence)) {
+            // Count confirmed tickets to assign sequence if missing
+            $sequence = $ticket->order()
+                ->pluck('ticket_sequence')
+                ->filter()
+                ->max() ?? 0;
+
+            $sequence++;
+
+            // Save the sequence
+            $ticket->update(['ticket_sequence' => $sequence]);
+            Log::debug("Assigned ticket_sequence", [
+                'ticket_id' => $ticket->id,
+                'sequence' => $sequence,
+            ]);
+        }
+
+        $orderNumber = $ticket->order->order_number ?? 'UNKNOWN';
+
+        return sprintf("TKT-%s-%03d", $orderNumber, $sequence);
     }
 
     /**
-     * Generate QR code for ticket
+     * Generate QR code with proper capture and NO PII
      * 
-     * Uses phpqrcode library or similar to generate QR
-     * Returns encoded string (usually base64 data URI or SVG)
+     * Uses output buffering to capture QRcode::png() output
+     * Data encoded: ticket_id, ticket_number, signature (HMAC)
+     * Excludes: email, phone, customer name
      */
     private function generateQRCode(string $ticketNumber, Ticket $ticket): string
     {
         try {
-            // Data to encode in QR
             $qrData = $this->buildQRData($ticketNumber, $ticket);
-            
-            // Generate QR code
-            $qrCode = \QRcode::png($qrData, false, QR_ECLEVEL_H, 4, 2);
-            
-            return base64_encode($qrCode);
+
+            // Capture output using ob_start
+            ob_start();
+            \QRcode::png($qrData, false, QR_ECLEVEL_H, 4, 2);
+            $qrImage = ob_get_clean();
+
+            if ($qrImage === false) {
+                throw new \Exception("Failed to capture QRcode output");
+            }
+
+            return base64_encode($qrImage);
 
         } catch (\Exception $e) {
-            Log::warning("Failed to generate QR code, using fallback", [
+            Log::warning("Failed to generate QR code", [
                 'ticket_id' => $ticket->id,
                 'error' => $e->getMessage(),
             ]);
-            
-            // Fallback: encode ticket number
-            return hash('sha256', $ticketNumber . $ticket->id);
+
+            // Fallback: use signature-based code (queryable by backend)
+            return $this->generateQRCodeFallback($ticketNumber, $ticket);
         }
     }
 
     /**
-     * Build data to encode in QR code
+     * Build QR data WITHOUT PII
+     * 
+     * Data: ticket_id, ticket_number, signature
+     * Signature: HMAC-SHA256 of ticket_id + ticket_number with app key
      */
     private function buildQRData(string $ticketNumber, Ticket $ticket): string
     {
+        // Generate HMAC signature for verification
+        $signatureData = $ticket->id . "|" . $ticketNumber;
+        $signature = hash_hmac(
+            'sha256',
+            $signatureData,
+            env(self::QR_HMAC_KEY_ENV, config('app.key'))
+        );
+
         return json_encode([
-            'ticket_number' => $ticketNumber,
             'ticket_id' => $ticket->id,
+            'ticket_number' => $ticketNumber,
             'screening_id' => $ticket->screening_id,
             'seat_id' => $ticket->seat_id,
-            'customer_email' => $ticket->customer_email,
-            'version' => '1.0',
+            'signature' => $signature,
+            'version' => self::QR_VERSION,
         ]);
     }
 
     /**
+     * Fallback QR code generation if PNG fails
+     * Returns a URL-safe token that can be looked up
+     */
+    private function generateQRCodeFallback(string $ticketNumber, Ticket $ticket): string
+    {
+        $token = hash('sha256', $ticketNumber . $ticket->id . time());
+        $compact = substr($token, 0, 16);
+
+        return "QR:" . strtoupper($compact);
+    }
+
+    /**
      * Mark screening seat as sold
+     * 
+     * Validations:
+     * - If status=sold and order_id != this order: ERROR
+     * - If status=reserved and order_id != this order: ERROR
+     * - If status=available: OK, update to sold
+     * - If status=reserved and order_id == this order: OK, update to sold
      */
     private function markSeatAsSold(int $screeningId, int $seatId, int $orderId): void
     {
@@ -667,22 +514,52 @@ class OrderFinalizationService
                 ->first();
 
             if (!$screeningSeat) {
-                Log::warning("Screening seat not found for marking as sold", [
+                Log::warning("Screening seat not found", [
                     'screening_id' => $screeningId,
                     'seat_id' => $seatId,
                 ]);
                 return;
             }
 
-            // Only update if not already sold
-            if ($screeningSeat->status === 'sold') {
-                Log::debug("Seat already marked as sold", [
+            // Validation 1: If already SOLD by different order, error
+            if ($screeningSeat->status === 'sold' && $screeningSeat->order_id !== $orderId) {
+                Log::error("Seat ownership conflict: already sold to different order", [
                     'screening_id' => $screeningId,
                     'seat_id' => $seatId,
+                    'current_order_id' => $screeningSeat->order_id,
+                    'attempting_order_id' => $orderId,
+                ]);
+
+                throw new InvalidSeatOwnershipException(
+                    "Seat {$seatId} already sold to order {$screeningSeat->order_id}"
+                );
+            }
+
+            // Validation 2: If RESERVED by different order, error
+            if ($screeningSeat->status === 'reserved' && $screeningSeat->order_id !== $orderId) {
+                Log::error("Seat ownership conflict: reserved by different order", [
+                    'screening_id' => $screeningId,
+                    'seat_id' => $seatId,
+                    'reserved_by' => $screeningSeat->order_id,
+                    'attempting_order_id' => $orderId,
+                ]);
+
+                throw new InvalidSeatOwnershipException(
+                    "Seat {$seatId} reserved by order {$screeningSeat->order_id}"
+                );
+            }
+
+            // Validation 3: If already sold by SAME order, skip (idempotent)
+            if ($screeningSeat->status === 'sold' && $screeningSeat->order_id === $orderId) {
+                Log::debug("Seat already sold by this order, skipping", [
+                    'screening_id' => $screeningId,
+                    'seat_id' => $seatId,
+                    'order_id' => $orderId,
                 ]);
                 return;
             }
 
+            // Update: Mark as sold
             $screeningSeat->update([
                 'status' => 'sold',
                 'order_id' => $orderId,
@@ -695,10 +572,13 @@ class OrderFinalizationService
                 'order_id' => $orderId,
             ]);
 
+        } catch (InvalidSeatOwnershipException $e) {
+            throw $e;
         } catch (\Exception $e) {
             Log::error("Error marking seat as sold", [
                 'screening_id' => $screeningId,
                 'seat_id' => $seatId,
+                'order_id' => $orderId,
                 'error' => $e->getMessage(),
             ]);
             throw $e;

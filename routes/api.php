@@ -8,6 +8,7 @@ use App\Http\Controllers\Api\RoomController;
 use App\Http\Controllers\Api\ScreeningController;
 use App\Http\Controllers\Api\TicketController;
 use App\Http\Controllers\Api\PaymentController;
+use App\Http\Controllers\Api\OrderController;
 
 /*
 |--------------------------------------------------------------------------
@@ -65,6 +66,12 @@ Route::get('/tickets/{ticketId}/validate', [TicketController::class, 'validateTi
 Route::get('/tickets/{ticketId}/qr', [TicketController::class, 'getTicketQR']);
 Route::get('/tickets/{ticketId}/details', [TicketController::class, 'getTicketDetails']);
 Route::get('/tickets/{ticketId}/print-thermal', [TicketController::class, 'getThermalPrintFormat']);
+
+// Public order validation endpoints (no auth required)
+Route::get('/orders/{orderNumber}/validate', [OrderController::class, 'validateOrder']);
+Route::get('/orders/{orderNumber}/pdf', [OrderController::class, 'getOrderPdf']);
+Route::get('/orders/{orderNumber}/tickets/{ticketId}/pdf', [OrderController::class, 'getTicketPdf']);
+Route::get('/orders/{uuid}', [OrderController::class, 'show']);
 
 // Protected routes (authentication required)
 Route::middleware('auth:sanctum')->group(function () {

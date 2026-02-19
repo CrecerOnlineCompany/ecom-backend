@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\PaymentStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -26,6 +27,34 @@ class PaymentProviderTicket extends Model
         'response_data' => 'json', // JSON en BD, automáticamente decodificado a array
         'initiated_at' => 'datetime',
         'completed_at' => 'datetime',
+    ];
+
+    // ============================================================================
+    // STATUS CONSTANTS - Using PaymentStatus enum as source of truth
+    // ============================================================================
+    
+    const STATUS_PENDING = PaymentStatus::STATUS_PENDING;           // pending → pending
+    const STATUS_PROCESSING = PaymentStatus::STATUS_PROCESSING;     // queued, processing → processing
+    const STATUS_COMPLETED = PaymentStatus::STATUS_COMPLETED;       // approved → completed
+    const STATUS_FAILED = PaymentStatus::STATUS_FAILED;             // declined, failed, finalization_failed → failed
+    const STATUS_CANCELLED = PaymentStatus::STATUS_CANCELLED;
+    const STATUS_EXPIRED = PaymentStatus::STATUS_EXPIRED;
+    const STATUS_REFUNDED = PaymentStatus::STATUS_REFUNDED;
+    
+    // Legacy aliases (for backward compatibility during migration)
+    const STATUS_APPROVED = PaymentStatus::STATUS_COMPLETED;
+    const STATUS_DECLINED = PaymentStatus::STATUS_FAILED;
+    const STATUS_QUEUED = PaymentStatus::STATUS_PROCESSING;
+    const STATUS_FINALIZATION_FAILED = PaymentStatus::STATUS_FAILED;
+
+    public static array $statuses = [
+        self::STATUS_PENDING,
+        self::STATUS_PROCESSING,
+        self::STATUS_COMPLETED,
+        self::STATUS_FAILED,
+        self::STATUS_CANCELLED,
+        self::STATUS_EXPIRED,
+        self::STATUS_REFUNDED,
     ];
 
     /**
@@ -71,46 +100,102 @@ class PaymentProviderTicket extends Model
     /**
      * Marcar pago como aprobado
      * 
-     * Flujo moderno con OrderFinalizationService:
-     * - Si payment tiene order_id: Finalize order (genera ticket_number, QR, marca confirmed/sold)
+     * ORDEN-FIRST:
+     * - Si payment tiene order_id: Finalize order (genera tickets, ticket_number, QR)
      * - Si no tiene order_id (legacy): Solo marcar ticket como confirmed
+     * 
+     * IMPORTANTE: Si la finalización falla, lanza excepción (no marca como approved)
+     * Esto permite que el webhook detecte el error y pueda reintentar
+     * 
+     * @param array $responseData Datos del webhook del provider
+     * @throws \Exception Si finalización de orden falla
      */
     public function approve(array $responseData = []): void
     {
-        $this->update([
-            'status' => 'approved',
-            'response_data' => array_merge($this->response_data ?? [], $responseData),
-            'completed_at' => now(),
-        ]);
-
-        // Route: Check if this payment is linked to an Order
+        // Ruta 1: Pago vinculado a ORDER (order-first flow)
         if ($this->order_id) {
-            // New flow: Finalize order (generate ticket_number, QR, mark confirmed, mark seats sold)
-            \Log::info("PaymentProviderTicket approved with order", [
+            \Log::info("PaymentProviderTicket::approve() - Order-first flow", [
                 'payment_ticket_id' => $this->id,
                 'order_id' => $this->order_id,
             ]);
 
+            // Intentar finalizar orden
             $finalizationService = app(\App\Services\OrderFinalizationService::class);
             $finalizationResult = $finalizationService->finalizeOrderAfterApproval(
                 $this->order_id,
                 $responseData
             );
 
-            if (!$finalizationResult['success']) {
-                \Log::warning("Order finalization returned non-success", [
+            // ⚠️ CRÍTICO: Si finalización falla, lanzar excepción
+            if (!($finalizationResult['success'] ?? false)) {
+                $errorMsg = $finalizationResult['message'] ?? 'Unknown finalization error';
+                $errorCode = $finalizationResult['error_code'] ?? 'FINALIZATION_ERROR';
+                
+                \Log::error("PaymentProviderTicket::approve() - Order finalization failed", [
+                    'payment_ticket_id' => $this->id,
                     'order_id' => $this->order_id,
-                    'result' => $finalizationResult,
+                    'error_code' => $errorCode,
+                    'error_msg' => $errorMsg,
+                    'full_result' => $finalizationResult,
                 ]);
+
+                // Marcar payment como 'finalization_failed' para auditoría
+                $this->update([
+                    'status' => 'finalization_failed',
+                    'response_data' => array_merge($this->response_data ?? [], [
+                        'finalization_error' => $errorMsg,
+                        'finalization_error_code' => $errorCode,
+                        'failed_at' => now()->toIso8601String(),
+                    ]),
+                    'completed_at' => now(),
+                ]);
+
+                throw new \Exception(
+                    "Order finalization failed: {$errorMsg} ({$errorCode})",
+                    0
+                );
             }
-        } elseif ($this->ticket) {
-            // Legacy flow: Only mark ticket as confirmed (no order, no seat inventory)
-            \Log::info("PaymentProviderTicket approved without order (legacy)", [
+
+            // Si llegas aquí, finalización fue exitosa
+            \Log::info("PaymentProviderTicket::approve() - Order finalized successfully", [
                 'payment_ticket_id' => $this->id,
-                'ticket_id' => $this->ticket->id,
+                'order_id' => $this->order_id,
+                'finalized_tickets' => $finalizationResult['finalized_tickets'] ?? 0,
             ]);
 
-            $this->ticket->update(['status' => 'confirmed']);
+            // Marcar payment como aprobado
+            $this->update([
+                'status' => 'approved',
+                'response_data' => array_merge($this->response_data ?? [], [
+                    'finalization_status' => 'success',
+                    'finalized_at' => now()->toIso8601String(),
+                ] + $responseData),
+                'completed_at' => now(),
+            ]);
+
+        } else {
+            // Ruta 2: Pago SIN order (legacy flow - vendimia/viejo)
+            \Log::info("PaymentProviderTicket::approve() - Legacy flow (no order)", [
+                'payment_ticket_id' => $this->id,
+                'ticket_id' => $this->ticket_id,
+            ]);
+
+            // Solo marcar payment como aprobado, el ticket ya debería existir
+            $this->update([
+                'status' => 'approved',
+                'response_data' => array_merge($this->response_data ?? [], $responseData),
+                'completed_at' => now(),
+            ]);
+
+            // Si hay ticket vinculado, marcar como confirmed
+            if ($this->ticket) {
+                $this->ticket->update(['status' => 'confirmed']);
+                
+                \Log::info("Ticket marcado como confirmed (legacy)", [
+                    'ticket_id' => $this->ticket->id,
+                    'payment_ticket_id' => $this->id,
+                ]);
+            }
         }
     }
 

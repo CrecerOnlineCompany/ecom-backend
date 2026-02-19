@@ -8,15 +8,43 @@ use Illuminate\Support\Str;
 class OrderNumberGenerator
 {
     /**
-     * Genera un número de orden único y legible
+     * Genera un número de orden único y legible con reintentos
      * Formato: ORD-YYYYMMDD-XXXXX (donde XXXXX es secuencial + check digit)
+     * 
+     * Implementa reintentos en caso de colisiones raras para máxima robustez
      *
+     * @param int $maxRetries Número máximo de reintentos
      * @return string
      */
-    public static function generate(): string
+    public static function generate(int $maxRetries = 3): string
+    {
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            try {
+                return self::generateWithLocking();
+            } catch (\Exception $e) {
+                // Si es un error de constraint duplicate en el último intento, re-lanzar
+                if ($attempt === $maxRetries) {
+                    throw $e;
+                }
+                // Pequeña pausa antes de reintentar
+                usleep(100000); // 100ms
+            }
+        }
+    }
+
+    /**
+     * Genera el número de orden con locking de base de datos
+     * 
+     * @return string
+     */
+    private static function generateWithLocking(): string
     {
         $date = now()->format('Ymd');
+        
+        // Usar lockForUpdate para asegurar que solo un proceso genera el número a la vez
+        // Esto previene race conditions cuando múltiples requests llegan simultáneamente
         $today_count = Order::whereDate('created_at', now()->startOfDay())
+            ->lockForUpdate()
             ->count();
         
         // Secuencial del día (4 dígitos)

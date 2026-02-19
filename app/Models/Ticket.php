@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\PaymentStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -52,6 +53,32 @@ class Ticket extends Model
         'used_at' => 'datetime',
         'screening_start_time' => 'datetime',
         'purchased_at' => 'datetime',
+    ];
+
+    // ============================================================================
+    // STATUS CONSTANTS - Using PaymentStatus enum as source of truth
+    // ============================================================================
+    
+    const STATUS_PENDING = PaymentStatus::STATUS_PENDING;           // pending_payment, processing → pending
+    const STATUS_PROCESSING = PaymentStatus::STATUS_PROCESSING;
+    const STATUS_COMPLETED = PaymentStatus::STATUS_COMPLETED;       // confirmed → completed
+    const STATUS_FAILED = PaymentStatus::STATUS_FAILED;             // payment_failed → failed
+    const STATUS_CANCELLED = PaymentStatus::STATUS_CANCELLED;
+    const STATUS_EXPIRED = PaymentStatus::STATUS_EXPIRED;
+    const STATUS_REFUNDED = PaymentStatus::STATUS_REFUNDED;
+    
+    // Legacy aliases (for backward compatibility during migration)
+    const STATUS_PENDING_PAYMENT = PaymentStatus::STATUS_PENDING;
+    const STATUS_CONFIRMED = PaymentStatus::STATUS_COMPLETED;
+    
+    public static array $statuses = [
+        self::STATUS_PENDING,
+        self::STATUS_PROCESSING,
+        self::STATUS_COMPLETED,
+        self::STATUS_FAILED,
+        self::STATUS_CANCELLED,
+        self::STATUS_EXPIRED,
+        self::STATUS_REFUNDED,
     ];
 
     public function screening(): BelongsTo

@@ -22,20 +22,34 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
     const MIN_AMOUNT_ORDER_QR = 15.00;
 
     /**
-     * Procesar pago por QR - Genera un QR dinámico para escanear
+     * ORDER-FIRST: Procesar pago por QR
+     * Espera Order creada con asientos reservados en inventory
+     * Genera un QR dinámico para escanear
      * Soporta dos modos: preference (dinámico) o pos_static_order (estático del POS)
      * 
-     * @param PaymentProviderTicket $paymentTicket
-     * @param array $additionalData Puede incluir 'qr_mode' para seleccionar modo
-     * @return array
+     * @param PaymentProviderTicket $paymentTicket (con order_id, sin ticket_id)
+     * @param array $additionalData ['order_id', 'total_price', 'seat_count', 'seat_ids']
+     * @return array con qr_data, amount, etc
      */
     public function processPayment(PaymentProviderTicket $paymentTicket, array $additionalData = []): array
     {
         try {
+            // ORDER-FIRST: Requiere Order, no Ticket
+            $order = $paymentTicket->order()->with(['screening.movie'])->first();
+            if (!$order) {
+                throw new \Exception('No se encontró orden vinculada (order-first flow requiere Order)');
+            }
+
+            $screening = $order->screening;
+            if (!$screening) {
+                throw new \Exception('Screening no encontrado en la orden');
+            }
+
             $mode = $additionalData['qr_mode'] ?? $this->provider->getConfig('qr_mode') ?? self::MODE_POS_STATIC_ORDER;
             
-            Log::info('MercadoPagoQR: Iniciando procesamiento de pago', [
+            Log::info('MercadoPagoQR (order-first): Iniciando procesamiento', [
                 'payment_ticket_id' => $paymentTicket->id,
+                'order_id' => $order->id,
                 'mode' => $mode,
             ]);
             
@@ -44,18 +58,13 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             $accessToken = $this->provider->getConfig('access_token');
             MercadoPagoConfig::setAccessToken($accessToken);
 
-            $ticket = $paymentTicket->ticket()->with(['screening.movie'])->first();
-            if (!$ticket) {
-                throw new \Exception('Ticket no encontrado');
-            }
-
-            $price = floatval($additionalData['total_price'] ?? $ticket->price);
-            $seatCount = intval($additionalData['seat_count'] ?? 1);
+            $price = floatval($additionalData['total_price'] ?? $order->total_amount);
+            $seatCount = intval($additionalData['seat_count'] ?? count($additionalData['seat_ids'] ?? []));
 
             if ($mode === self::MODE_POS_STATIC_ORDER) {
-                return $this->generatePosStaticOrderQr($paymentTicket, $ticket, $price, $seatCount);
+                return $this->generatePosStaticOrderQr($paymentTicket, $order, $screening, $price, $seatCount, $additionalData);
             } else {
-                return $this->generatePreferenceQr($paymentTicket, $ticket, $price, $seatCount);
+                return $this->generatePreferenceQr($paymentTicket, $order, $screening, $price, $seatCount, $additionalData);
             }
 
         } catch (\Exception $e) {
@@ -73,10 +82,9 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
     }
 
     /**
-     * MODO 1: Generar QR dinámico a partir de preferencia de Mercado Pago
-     * Genera un preference, obtiene el init_point y lo codifica en QR
+     * MODO 1: Generar QR dinámico a partir de preferencia de Mercado Pago (ORDER-FIRST)
      */
-    private function generatePreferenceQr(PaymentProviderTicket $paymentTicket, $ticket, float $price, int $seatCount): array
+    private function generatePreferenceQr(PaymentProviderTicket $paymentTicket, $order, $screening, float $price, int $seatCount, array $additionalData = []): array
     {
         try {
             $accessToken = $this->provider->getConfig('access_token');
@@ -86,9 +94,10 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             
             $client = new PreferenceClient();
             
+            $movieTitle = $screening->movie->title ?? 'Cine - Entrada';
             $itemTitle = $seatCount > 1
-                ? "{$seatCount} Entradas - {$ticket->screening->movie->title}"
-                : "Entrada - {$ticket->screening->movie->title}";
+                ? "{$seatCount} Entradas - {$movieTitle}"
+                : "Entrada - {$movieTitle}";
             
             $createData = [
                 'items' => [
@@ -111,7 +120,7 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             try {
                 $preference = $client->create($createData);
             } catch (MPApiException $sdkException) {
-                Log::error('MercadoPagoQR: Error creando preferencia', [
+                Log::error('MercadoPagoQR: Error creando preferencia (order-first)', [
                     'message' => $sdkException->getMessage(),
                 ]);
                 throw new \Exception('Mercado Pago Error: ' . $sdkException->getMessage());
@@ -125,6 +134,10 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             $qrDataUri = QRCodeGenerator::generateQRDataUri($preferenceLink);
             $qrSvg = QRCodeGenerator::generateQRSvg($preferenceLink);
 
+            // Obtener idempotency_key desde additionalData (si viene del manager)
+            // o desde response_data si fue reutilizado
+            $idempotencyKey = $additionalData['idempotency_key'] ?? $paymentTicket->response_data['idempotency_key'] ?? null;
+
             $paymentTicket->update([
                 'status' => 'processing',
                 'transaction_id' => $preference->id,
@@ -136,8 +149,9 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                     'qr_data_uri' => $qrDataUri,
                     'amount' => $price,
                     'currency' => 'ARS',
-                    'movie' => $ticket->screening->movie->title,
+                    'movie' => $movieTitle,
                     'seats' => $seatCount,
+                    'idempotency_key' => $idempotencyKey,
                 ],
             ]);
 
@@ -155,7 +169,7 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             ];
 
         } catch (\Exception $e) {
-            Log::error('MercadoPagoQR: Error generando QR dinámico', [
+            Log::error('MercadoPagoQR: Error generando QR dinámico (order-first)', [
                 'error' => $e->getMessage(),
             ]);
             throw $e;
@@ -166,8 +180,9 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
      * MODO 2: Generar Order QR + usar POS estático
      * Crea una Order type="qr" asociada a external_pos_id
      * Devuelve los datos para mostrar QR estático del POS
+     * ORDER-FIRST
      */
-    private function generatePosStaticOrderQr(PaymentProviderTicket $paymentTicket, $ticket, float $price, int $seatCount): array
+    private function generatePosStaticOrderQr(PaymentProviderTicket $paymentTicket, $order, $screening, float $price, int $seatCount, array $additionalData = []): array
     {
         try {
             if ($price < self::MIN_AMOUNT_ORDER_QR) {
@@ -201,21 +216,26 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             ];
 
             try {
-                $order = $client->create($createData);
+                $mpOrder = $client->create($createData);
             } catch (MPApiException $sdkException) {
-                Log::error('MercadoPagoQR: Error creando Order QR', [
+                Log::error('MercadoPagoQR: Error creando Order QR (order-first)', [
                     'message' => $sdkException->getMessage(),
                 ]);
                 throw new \Exception('Mercado Pago Order Error: ' . $sdkException->getMessage());
             }
 
-            $orderId = $order->id ?? null;
+            $orderId = $mpOrder->id ?? null;
             if (empty($orderId)) {
                 throw new \Exception('No se pudo obtener order_id de la Order QR');
             }
 
             $posQrImageUrl = $this->getPosQrImageUrl($externalPosId);
 
+            $movieTitle = $screening->movie->title ?? 'Cine - Entrada';
+            
+            // Obtener idempotency_key desde additionalData o desde response_data si fue reutilizado
+            $idempotencyKey = $additionalData['idempotency_key'] ?? $paymentTicket->response_data['idempotency_key'] ?? null;
+            
             $responseData = [
                 'qr_mode' => self::MODE_POS_STATIC_ORDER,
                 'order_id' => $orderId,
@@ -223,8 +243,9 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                 'external_pos_id' => $externalPosId,
                 'amount' => $price,
                 'currency' => 'ARS',
-                'movie' => $ticket->screening->movie->title,
+                'movie' => $movieTitle,
                 'seats' => $seatCount,
+                'idempotency_key' => $idempotencyKey,
             ];
             
             if (!empty($posQrImageUrl)) {
@@ -324,54 +345,108 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
      * Soporta múltiples formatos y tipos de notificaciones
      * 
      * @param Request $request
-     * @return bool
+     * @return bool Success indica si webhook fue procesado en general
+     *              (no necesariamente que el pago fue aprobado,
+     *               solo que no hubo error técnico)
      */
     public function handleWebhook(Request $request): bool
     {
         try {
             $data = $request->all();
             
+            Log::info('MercadoPagoQR: Webhook recibido', [
+                'data_keys' => array_keys($data),
+            ]);
+
+            // Step 1: Extraer ID externo (puede venir en múltiples formatos)
             $externalId = $this->extractExternalId($data);
             if (empty($externalId)) {
                 Log::warning('MercadoPagoQR: Webhook sin ID identificable');
-                return false;
+                return true; // Procesar pero sin hacer nada
             }
 
+            Log::info('MercadoPagoQR: ID externo extraído', [
+                'external_id' => $externalId,
+            ]);
+
+            // Step 2: Buscar PaymentProviderTicket
             $paymentTicket = $this->findPaymentTicket($externalId, $data);
             if (!$paymentTicket) {
-                return false;
+                Log::warning('MercadoPagoQR: PaymentProviderTicket no encontrado', [
+                    'external_id' => $externalId,
+                ]);
+                return true; // Procesar pero sin hacer nada
             }
 
+            // Step 3: Obtener status del webhook
             $status = $this->getPaymentStatusFromWebhook($data, $externalId);
             $mappedStatus = $this->mapPaymentStatus($status);
 
-            Log::info('MercadoPagoQR: Procesando webhook', [
+            Log::info('MercadoPagoQR: Status mapeado', [
                 'payment_ticket_id' => $paymentTicket->id,
                 'transaction_id' => $externalId,
                 'original_status' => $status,
                 'mapped_status' => $mappedStatus,
+                'order_id' => $paymentTicket->order_id,
             ]);
 
+            // Step 4: Procesar según status mapeado
             if ($mappedStatus === 'approved') {
-                $paymentTicket->approve($data);
+                try {
+                    $paymentTicket->approve([
+                        'external_payment_id' => $externalId,
+                        'webhook_data' => $data,
+                        'qr_approved_at' => now()->toIso8601String(),
+                    ]);
+
+                    Log::info('MercadoPagoQR: Pago QR aprobado', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'external_id' => $externalId,
+                    ]);
+                } catch (\Exception $e) {
+                    // approve() lanzó excepción = finalización falló
+                    Log::error('MercadoPagoQR: Error al aprobar pago QR', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'error' => $e->getMessage(),
+                        'external_id' => $externalId,
+                    ]);
+                    return false; // Reintentar webhook
+                }
             } else {
+                // No aprobado: update status sin llamar approve()
                 $responseData = $paymentTicket->response_data ?? [];
                 $responseData = array_merge($responseData, [
                     'webhook_status' => $status,
                     'webhook_processed_at' => now()->toIso8601String(),
+                    'webhook_data' => $data,
                 ]);
                 
-                $paymentTicket->update([
-                    'status' => $mappedStatus,
-                    'response_data' => $responseData,
-                ]);
+                try {
+                    $paymentTicket->update([
+                        'status' => $mappedStatus,
+                        'response_data' => $responseData,
+                    ]);
+
+                    Log::info('MercadoPagoQR: Status actualizado (no aprobado)', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'external_id' => $externalId,
+                        'new_status' => $mappedStatus,
+                    ]);
+                } catch (\Exception $e) {
+                    Log::error('MercadoPagoQR: Error al actualizar pago', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                    return false;
+                }
             }
 
             return true;
 
         } catch (\Exception $e) {
-            Log::error('MercadoPagoQR: Error procesando webhook', [
+            Log::error('MercadoPagoQR: Error inesperado procesando webhook', [
                 'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
             ]);
             return false;
         }

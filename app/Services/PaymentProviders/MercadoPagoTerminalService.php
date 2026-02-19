@@ -89,11 +89,31 @@ class MercadoPagoTerminalService
             ]);
 
             // 2. Intentar cancelarla
-            $cancelResult = $this->cancelOrderFromApi($activeOrder['order_id']);
+            $cancelResult = $this->cancelOrderFromApi($activeOrder['order_id'], $activeOrder['idempotency_key'] ?? null);
 
             if (!$cancelResult['success']) {
+                // Verificar si el error es porque la orden ya está en 'at_terminal' o en otro estado no cancelable
+                $errorCode = $cancelResult['error_code'] ?? null;
+                
+                if ($errorCode === 'cannot_cancel_order') {
+                    // La orden no se puede cancelar (está en at_terminal, declined, approved, etc)
+                    // En este caso, no podemos proceder. El usuario debe esperar a que expire (10 min)
+                    $result['cancel_error'] = $cancelResult['error'];
+                    $result['can_proceed'] = false;
+                    $result['retry_after_seconds'] = 600; // 10 minutos (tiempo de expiración)
+                    
+                    Log::warning('MercadoPagoTerminal: Orden en estado no cancelable (at_terminal?)', [
+                        'order_id' => $activeOrder['order_id'],
+                        'error' => $cancelResult['error'],
+                        'error_code' => $errorCode,
+                    ]);
+                    
+                    return $result;
+                }
+                
+                // Para otros errores, retornar el error normal
                 $result['cancel_error'] = $cancelResult['error'];
-                $result['can_proceed'] = false; // No proce der si no podemos cancelar la anterior
+                $result['can_proceed'] = false;
 
                 Log::error('MercadoPagoTerminal: Fallo cancelación de orden activa', [
                     'order_id' => $activeOrder['order_id'],
@@ -155,10 +175,18 @@ class MercadoPagoTerminalService
                 'status' => $mpTerminalOrder->status,
             ]);
 
+            // Obtener idempotency_key del ticket si existe
+            $idempotencyKey = null;
+            if ($mpTerminalOrder->payment_provider_ticket_id) {
+                $ticket = PaymentProviderTicket::find($mpTerminalOrder->payment_provider_ticket_id);
+                $idempotencyKey = $ticket?->response_data['idempotency_key'] ?? null;
+            }
+
             return [
                 'order_id' => $mpTerminalOrder->order_id,
                 'source' => 'db',
                 'ticket_id' => $mpTerminalOrder->payment_provider_ticket_id,
+                'idempotency_key' => $idempotencyKey,
             ];
         }
 
@@ -226,6 +254,7 @@ class MercadoPagoTerminalService
                 'order_id' => $ticket->transaction_id,
                 'source' => 'db',
                 'ticket_id' => $ticket->id,
+                'idempotency_key' => $ticket->response_data['idempotency_key'] ?? null,
             ];
         }
 
@@ -295,8 +324,9 @@ class MercadoPagoTerminalService
 
     /**
      * Cancelar orden en la API de Mercado Pago
+     * IMPORTANTE: Usa un idempotency_key DIFERENTE para cancelación (no reutiliza el de creación)
      */
-    private function cancelOrderFromApi(string $orderId): array
+    private function cancelOrderFromApi(string $orderId, string $idempotencyKey = null): array
     {
         try {
             $accessToken = $this->provider->getConfig('access_token');
@@ -308,16 +338,23 @@ class MercadoPagoTerminalService
                 ];
             }
 
+            // CRITIAL: Para cancelación, SIEMPRE generar un nuevo key
+            // El key de creación ya está usado en MP, no se puede reutilizar
+            $cancelIdempotencyKey = \Illuminate\Support\Str::uuid()->toString();
+
             $url = self::MP_API_BASE . "/{$orderId}/cancel";
 
             Log::debug('MercadoPagoTerminal: Enviando POST cancel a API', [
                 'order_id' => $orderId,
                 'url' => $url,
+                'cancel_idempotency_key' => $cancelIdempotencyKey,
+                'original_idempotency_key' => $idempotencyKey,
             ]);
 
             $response = Http::withToken($accessToken)
                 ->withHeaders([
                     'Content-Type' => 'application/json',
+                    'X-Idempotency-Key' => $cancelIdempotencyKey,
                 ])
                 ->timeout(self::API_TIMEOUT)
                 ->post($url);
@@ -335,9 +372,23 @@ class MercadoPagoTerminalService
                 ];
             }
 
+            // Parsear el error para extraer el código específico
+            $errorCode = null;
+            $errorBody = $response->body();
+            
+            try {
+                $errorData = json_decode($errorBody, true);
+                if (isset($errorData['errors'][0]['code'])) {
+                    $errorCode = $errorData['errors'][0]['code'];
+                }
+            } catch (\Exception $e) {
+                // Si no es JSON válido, mantener null
+            }
+
             return [
                 'success' => false,
-                'error' => $response->body(),
+                'error' => $errorBody,
+                'error_code' => $errorCode,
                 'status_code' => $statusCode,
             ];
 

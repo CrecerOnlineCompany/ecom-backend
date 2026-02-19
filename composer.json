@@ -6,13 +6,15 @@
     "license": "MIT",
     "require": {
         "php": "^8.1",
+        "barryvdh/laravel-dompdf": "^3.1",
         "guzzlehttp/guzzle": "^7.2",
         "laravel/framework": "^10.10",
         "laravel/sanctum": "^3.3",
         "laravel/tinker": "^2.8",
+        "mercadopago/dx-php": "3.8.0",
+        "open-admin-ext/log-viewer": "^1.0",
         "open-admin-org/open-admin": "^1.0",
-        "phpoffice/phpspreadsheet": "*",
-        "mercadopago/dx-php": "3.8.0"
+        "phpoffice/phpspreadsheet": "*"
     },
     "require-dev": {
         "fakerphp/faker": "^1.9.1",

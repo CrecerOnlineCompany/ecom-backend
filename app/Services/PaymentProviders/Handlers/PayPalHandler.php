@@ -80,51 +80,151 @@ class PayPalHandler extends PaymentProviderHandler
 
     /**
      * Procesar webhook de PayPal
+     * 
+     * Soporta múltiples eventos:
+     * - PAYMENT.CAPTURE.COMPLETED → Pago aprobado
+     * - PAYMENT.CAPTURE.DENIED → Pago rechazado
+     * - PAYMENT.CAPTURE.REFUNDED → Reembolso
      */
     public function handleWebhook(Request $request): bool
     {
         try {
-            $this->validateWebhookSignature($request);
-            
+            // Step 1: Validar firma del webhook
+            try {
+                $this->validateWebhookSignature($request);
+            } catch (\Exception $e) {
+                Log::warning('PayPal: Webhook signature validation failed', [
+                    'error' => $e->getMessage(),
+                    'ip' => $request->ip(),
+                ]);
+                return false;
+            }
+
+            // Step 2: Extraer datos críticos
             $event = $request->input('event_type');
             $resource = $request->input('resource');
-            
-            $paymentId = $resource['supplementary_data']['related_ids']['order_id'] ?? null;
-            
+
+            if (!$event || !$resource) {
+                Log::warning('PayPal: Webhook sin event_type o resource', [
+                    'event' => $event,
+                    'has_resource' => !empty($resource),
+                ]);
+                return false;
+            }
+
+            // Step 3: Obtener Payment ID (puede venir en múltiples lugares)
+            $paymentId = $resource['supplementary_data']['related_ids']['order_id'] 
+                      ?? $resource['id'] 
+                      ?? null;
+
             if (!$paymentId) {
-                return false;
+                Log::warning('PayPal: Webhook sin payment ID identificable', [
+                    'event' => $event,
+                    'resource_keys' => array_keys($resource ?? []),
+                ]);
+                return true; // Procesar pero sin hacer nada
             }
-            
+
+            Log::info('PayPal: Webhook recibido', [
+                'event' => $event,
+                'payment_id' => $paymentId,
+            ]);
+
+            // Step 4: Buscar PaymentProviderTicket
             $paymentTicket = PaymentProviderTicket::findByTransactionOrId($paymentId);
-            
+
             if (!$paymentTicket) {
-                return false;
+                Log::warning('PayPal: PaymentProviderTicket no encontrado', [
+                    'payment_id' => $paymentId,
+                    'event' => $event,
+                ]);
+                return true; // Procesar pero sin hacer nada
             }
-            
+
+            Log::info('PayPal: PaymentProviderTicket encontrado', [
+                'payment_ticket_id' => $paymentTicket->id,
+                'event' => $event,
+                'order_id' => $paymentTicket->order_id,
+            ]);
+
+            // Step 5: Procesar según tipo de evento
             switch ($event) {
                 case 'PAYMENT.CAPTURE.COMPLETED':
-                    $paymentTicket->approve([
-                        'transaction_id' => $resource['id'],
-                        'status' => 'COMPLETED',
-                        'webhook_data' => $request->all(),
-                    ]);
+                    try {
+                        $paymentTicket->approve([
+                            'transaction_id' => $resource['id'],
+                            'status' => 'COMPLETED',
+                            'webhook_data' => $request->all(),
+                            'captured_at' => now()->toIso8601String(),
+                        ]);
+
+                        Log::info('PayPal: Pago capturado y aprobado', [
+                            'payment_ticket_id' => $paymentTicket->id,
+                            'transaction_id' => $resource['id'],
+                        ]);
+                    } catch (\Exception $e) {
+                        // approve() lanzó excepción = finalización falló
+                        Log::error('PayPal: Error al capturar pago', [
+                            'payment_ticket_id' => $paymentTicket->id,
+                            'error' => $e->getMessage(),
+                            'transaction_id' => $resource['id'],
+                        ]);
+                        return false;
+                    }
                     break;
-                    
+
                 case 'PAYMENT.CAPTURE.DENIED':
-                    $paymentTicket->decline([
-                        'reason' => 'CAPTURE_DENIED',
-                        'webhook_data' => $request->all(),
-                    ]);
+                    try {
+                        $paymentTicket->decline([
+                            'reason' => 'CAPTURE_DENIED',
+                            'webhook_data' => $request->all(),
+                            'denied_at' => now()->toIso8601String(),
+                        ]);
+
+                        Log::info('PayPal: Pago rechazado', [
+                            'payment_ticket_id' => $paymentTicket->id,
+                        ]);
+                    } catch (\Exception $e) {
+                        Log::error('PayPal: Error al rechazar pago', [
+                            'payment_ticket_id' => $paymentTicket->id,
+                            'error' => $e->getMessage(),
+                        ]);
+                        return false;
+                    }
                     break;
-                    
+
                 case 'PAYMENT.CAPTURE.REFUNDED':
-                    $paymentTicket->refund('PayPal refund');
+                    try {
+                        $refundId = $resource['id'] ?? 'unknown';
+                        $paymentTicket->refund("PayPal refund - Refund ID: {$refundId}");
+
+                        Log::info('PayPal: Reembolso procesado', [
+                            'payment_ticket_id' => $paymentTicket->id,
+                            'refund_id' => $refundId,
+                        ]);
+                    } catch (\Exception $e) {
+                        Log::error('PayPal: Error al procesar reembolso', [
+                            'payment_ticket_id' => $paymentTicket->id,
+                            'error' => $e->getMessage(),
+                        ]);
+                        return false;
+                    }
                     break;
+
+                default:
+                    Log::debug('PayPal: Evento no procesado', [
+                        'event' => $event,
+                        'payment_ticket_id' => $paymentTicket->id,
+                    ]);
+                    return true;
             }
-            
+
             return true;
         } catch (\Exception $e) {
-            Log::error('PayPal webhook error: ' . $e->getMessage());
+            Log::error('PayPal: Error inesperado procesando webhook', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
             return false;
         }
     }

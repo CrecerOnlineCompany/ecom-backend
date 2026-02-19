@@ -29,26 +29,41 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
     }
 
     /**
-     * Procesar pago por Terminal Smart Mercado Pago Punto
+     * ORDER-FIRST: Procesar pago por Terminal Smart Mercado Pago Punto
+     * Espera Order creada con asientos reservados en inventory
      */
     public function processPayment(PaymentProviderTicket $paymentTicket, array $additionalData = []): array
     {
         try {
+            // ORDER-FIRST: Requiere Order, no Ticket
+            $order = $paymentTicket->order()->with(['screening.movie'])->first();
+            if (!$order) {
+                throw new \Exception('No se encontró orden vinculada (order-first flow requiere Order)');
+            }
+
+            $screening = $order->screening;
+            if (!$screening) {
+                throw new \Exception('Screening no encontrado en la orden');
+            }
+
             $this->validateConfiguration();
 
             // Obtener configuración
             $accessToken = $this->provider->getConfig('access_token');
             $terminalId = $this->provider->getConfig('terminal_id');
 
-            $ticket = $paymentTicket->ticket()->with(['screening.movie'])->first();
-            if (!$ticket) {
-                throw new \Exception('Ticket no encontrado');
-            }
-
-            $price = floatval($additionalData['total_price'] ?? $ticket->price);
-            $seatCount = intval($additionalData['seat_count'] ?? 1);
+            $price = floatval($additionalData['total_price'] ?? $order->total_amount);
+            $seatCount = intval($additionalData['seat_count'] ?? count($additionalData['seat_ids'] ?? []));
             $externalReference = $paymentTicket->generateExternalReference('POINT');
             $amountFormatted = number_format($price, 2, '.', '');
+            $idempotencyKey = $additionalData['idempotency_key'] ?? $paymentTicket->response_data['idempotency_key'] ?? null;
+
+            Log::info('MercadoPagoPoint (order-first): Iniciando procesamiento', [
+                'payment_ticket_id' => $paymentTicket->id,
+                'order_id' => $order->id,
+                'terminal_id' => $terminalId,
+                'idempotency_key' => $idempotencyKey,
+            ]);
 
             // ===== PRE-CHECK: Auto-cancel global por terminal si está habilitado =====
             if (self::ENABLE_AUTO_CANCEL_QUEUED || self::ENABLE_AUTO_CANCEL_ON_ANY_METHOD) {
@@ -58,13 +73,22 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                     Log::warning('MercadoPagoPoint: Guard bloqueó la creación de orden', [
                         'reason' => $guardResult['cancel_error'],
                         'terminal_id' => $terminalId,
+                        'retry_after' => $guardResult['retry_after_seconds'] ?? null,
                     ]);
+
+                    // Mejorar el mensaje si está en estado at_terminal
+                    $message = $guardResult['cancel_error'];
+                    if ($guardResult['retry_after_seconds'] ?? null) {
+                        $minutes = ceil($guardResult['retry_after_seconds'] / 60);
+                        $message = "La terminal tiene un pago pendiente que no se puede cancelar. Por favor intenta en {$minutes} minuto(s).";
+                    }
 
                     return [
                         'success' => false,
                         'error_code' => 'terminal_blocked',
                         'retryable' => true,
-                        'error' => $guardResult['cancel_error'],
+                        'message' => $message,
+                        'retry_after_seconds' => $guardResult['retry_after_seconds'] ?? null,
                     ];
                 }
             }
@@ -73,12 +97,13 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             // Enviar orden a la API de Mercado Pago
             $result = $this->sendToTerminal(
                 $paymentTicket,
-                $ticket->screening->movie->title,
+                $screening->movie->title,
                 $price,
                 $seatCount,
                 $accessToken,
                 $terminalId,
-                $externalReference
+                $externalReference,
+                $idempotencyKey
             );
 
             if (!$result['success']) {
@@ -86,7 +111,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                     'success' => false,
                     'error_code' => $result['error_code'] ?? 'unknown',
                     'retryable' => $result['retryable'] ?? false,
-                    'error' => $result['error'] ?? 'Unknown error',
+                    'message' => $result['message'] ?? $result['error'] ?? 'Unknown error',
                 ];
             }
 
@@ -97,10 +122,11 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                 'external_reference' => $externalReference,
                 'order_id' => $orderId,
                 'amount' => $amountFormatted,
+                'idempotency_key' => $idempotencyKey, // Mantener el key usado
                 'payload' => [
                     'type' => 'point',
                     'external_reference' => $externalReference,
-                    'description' => "Entradas - {$ticket->screening->movie->title} ({$seatCount} un.)",
+                    'description' => "Entradas - {$screening->movie->title} ({$seatCount} un.)",
                     'expiration_time' => 'PT10M',
                     'transactions' => [
                         'payments' => [
@@ -167,7 +193,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
 
             return [
                 'success' => false,
-                'error' => $e->getMessage(),
+                'message' => $e->getMessage(),
             ];
         }
     }
@@ -182,9 +208,25 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
         int $seatCount,
         string $accessToken,
         string $terminalId,
-        string $externalReference
+        string $externalReference,
+        string $idempotencyKey = null
     ): array {
         $amountFormatted = number_format($amount, 2, '.', '');
+
+        // Usar el idempotency_key que viene de additionalData (si no vino, usar el almacenado)
+        if (!$idempotencyKey) {
+            $idempotencyKey = $paymentTicket->response_data['idempotency_key'] ?? null;
+        }
+        
+        // Si aún no tenemos key, generar uno nuevo (nunca debería llegar aquí)
+        if (!$idempotencyKey) {
+            $idempotencyKey = $this->generateIdempotencyKey($paymentTicket->id);
+            
+            // Guardar el idempotency_key inmediatamente
+            $currentResponseData = $paymentTicket->response_data ?? [];
+            $currentResponseData['idempotency_key'] = $idempotencyKey;
+            $paymentTicket->update(['response_data' => $currentResponseData]);
+        }
 
         $payload = [
             'type' => 'point',
@@ -205,7 +247,11 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             ]
         ];
 
-        $idempotencyKey = $this->generateIdempotencyKey($paymentTicket->id);
+        Log::debug('MercadoPagoPoint: Enviando a terminal con headers', [
+            'payment_ticket_id' => $paymentTicket->id,
+            'idempotency_key' => $idempotencyKey,
+            'terminal_id' => $terminalId,
+        ]);
 
         $response = Http::withToken($accessToken)
             ->withHeaders([
@@ -224,7 +270,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             }
             return [
                 'success' => false,
-                'error' => 'No se recibió order_id en la respuesta de Mercado Pago',
+                'message' => 'No se recibió order_id en la respuesta de Mercado Pago',
             ];
         }
 
@@ -249,7 +295,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                         'success' => false,
                         'error_code' => 'terminal_busy',
                         'retryable' => true,
-                        'error' => 'La terminal tiene una orden en cola. Cancelala desde el Smart e intentá nuevamente.',
+                        'message' => 'La terminal tiene una orden en cola. Cancelala desde el Smart e intentá nuevamente.',
                     ];
                 }
 
@@ -261,7 +307,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                         'success' => false,
                         'error_code' => 'auto_cancel_failed',
                         'retryable' => true,
-                        'error' => $guardResult['cancel_error'] ?? 'No se pudo cancelar la orden anterior',
+                        'message' => $guardResult['cancel_error'] ?? 'No se pudo cancelar la orden anterior',
                     ];
                 }
 
@@ -309,7 +355,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                         'success' => false,
                         'error_code' => 'retry_failed',
                         'retryable' => true,
-                        'error' => 'No se pudo crear orden incluso tras cancelar la anterior.',
+                        'message' => 'No se pudo crear orden incluso tras cancelar la anterior.',
                     ];
                 }
             }
@@ -323,7 +369,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
 
         return [
             'success' => false,
-            'error' => "API de Mercado Pago: {$errorBody}",
+            'message' => "API de Mercado Pago: {$errorBody}",
         ];
     }
 
@@ -337,13 +383,23 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
     }
 
     /**
-     * Procesar webhook de confirmación de pago en terminal
+     * Procesar webhook de confirmación de pago en terminal Smart
+     * 
+     * Soporta notificaciones de pagos con Mercado Pago Smart Point
+     * Mapea status específico a estados estándar del sistema
+     * 
+     * @return bool Indica si webhook fue procesado sin errores técnicos
      */
     public function handleWebhook(Request $request): bool
     {
         try {
             $data = $request->all();
 
+            Log::info('MercadoPagoPoint: Webhook recibido', [
+                'data_keys' => array_keys($data),
+            ]);
+
+            // Step 1: Extraer IDs y status
             // El webhook debe contener el order_id en transaction_id
             $orderId = $data['id'] ?? $data['data']['id'] ?? null;
             $status = $data['status'] ?? $data['data']['status'] ?? null;
@@ -352,51 +408,103 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                 Log::warning('MercadoPagoPoint: Webhook incompleto', [
                     'has_order_id' => !empty($orderId),
                     'has_status' => !empty($status),
+                    'data_keys' => array_keys($data),
                 ]);
-                return false;
+                return true; // Procesar pero sin hacer nada
             }
 
-            // Buscar PaymentProviderTicket por transaction_id o ID
+            Log::info('MercadoPagoPoint: Datos extraídos', [
+                'order_id' => $orderId,
+                'status' => $status,
+            ]);
+
+            // Step 2: Buscar PaymentProviderTicket
             $paymentTicket = PaymentProviderTicket::findByTransactionOrId($orderId);
 
             if (!$paymentTicket) {
                 Log::warning('MercadoPagoPoint: PaymentProviderTicket no encontrado', [
                     'order_id' => $orderId,
+                    'status' => $status,
                 ]);
-                return false;
+                return true; // Procesar pero sin hacer nada
             }
 
-            // Mapear estado según API de Mercado Pago
+            Log::info('MercadoPagoPoint: PaymentProviderTicket encontrado', [
+                'payment_ticket_id' => $paymentTicket->id,
+                'current_status' => $paymentTicket->status,
+                'order_id' => $paymentTicket->order_id,
+            ]);
+
+            // Step 3: Mapear status de API Terminal
             $mappedStatus = match($status) {
                 'approved' => 'approved',
-                'pending' => 'pending',
+                'pending' => 'processing',
                 'payment_failure', 'declined', 'cancelled' => 'declined',
-                default => 'pending',
+                default => 'processing',
             };
 
-            // Actualizar ticket
+            Log::info('MercadoPagoPoint: Status mapeado', [
+                'original_status' => $status,
+                'mapped_status' => $mappedStatus,
+            ]);
+
+            // Step 4: Actualizar según status
             if ($mappedStatus === 'approved') {
-                $paymentTicket->approve(array_merge($data, ['webhook_received_at' => now()->toIso8601String()]));
-                Log::info('MercadoPagoPoint: Pago aprobado', ['payment_ticket_id' => $paymentTicket->id]);
+                try {
+                    $paymentTicket->approve(array_merge($data, [
+                        'webhook_received_at' => now()->toIso8601String(),
+                        'terminal_approved_at' => now()->toIso8601String(),
+                    ]));
+
+                    Log::info('MercadoPagoPoint: Pago terminal aprobado y orden finalizada', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'order_id' => $orderId,
+                    ]);
+                } catch (\Exception $e) {
+                    // approve() lanzó excepción = finalización falló
+                    Log::error('MercadoPagoPoint: Error al aprobar pago terminal', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'error' => $e->getMessage(),
+                        'order_id' => $orderId,
+                    ]);
+                    return false; // Reintentar
+                }
             } else {
-                $paymentTicket->update([
-                    'status' => $mappedStatus,
-                    'response_data' => array_merge(
-                        $paymentTicket->response_data ?? [],
-                        $data,
-                        ['webhook_received_at' => now()->toIso8601String()]
-                    ),
-                ]);
-                Log::info('MercadoPagoPoint: Estado actualizado', [
-                    'payment_ticket_id' => $paymentTicket->id,
-                    'status' => $mappedStatus,
-                ]);
+                // No aprobado: actualizar status sin llamar approve()
+                try {
+                    $paymentTicket->update([
+                        'status' => $mappedStatus,
+                        'response_data' => array_merge(
+                            $paymentTicket->response_data ?? [],
+                            $data,
+                            [
+                                'webhook_received_at' => now()->toIso8601String(),
+                                'terminal_status' => $status,
+                            ]
+                        ),
+                    ]);
+
+                    Log::info('MercadoPagoPoint: Status terminal actualizado', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'new_status' => $mappedStatus,
+                        'original_status' => $status,
+                    ]);
+                } catch (\Exception $e) {
+                    Log::error('MercadoPagoPoint: Error al actualizar pago terminal', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'error' => $e->getMessage(),
+                    ]);
+                    return false;
+                }
             }
 
             return true;
 
         } catch (\Exception $e) {
-            Log::error('MercadoPagoPoint: Error en webhook', ['error' => $e->getMessage()]);
+            Log::error('MercadoPagoPoint: Error inesperado procesando webhook', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
             return false;
         }
     }

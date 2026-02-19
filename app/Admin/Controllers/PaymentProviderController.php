@@ -239,42 +239,22 @@ class PaymentProviderController extends AdminController
     }
     
     /**
+     * Campos que deben ser booleanos en el config
+     */
+    private $booleanConfigFields = [
+        'supports_redirect',
+        'supports_qr',
+        'supports_terminal',
+        'auto_send',
+    ];
+
+    /**
      * Construir el JSON de config con lógica completa
      */
     private function buildConfigJson(array $configFields): array
     {
-        $config = [];
-        
-        // Copiar todos los campos con conversiones apropiadas
-        foreach ($configFields as $key => $value) {
-            if ($value === '1' || $value === 'on' || $value === true) {
-                $config[$key] = true;
-            } elseif ($value === '0' || $value === '' || $value === false || $value === null) {
-                $config[$key] = false;
-            } else {
-                $config[$key] = $value;
-            }
-            Log::debug("  Convertido: $key → " . var_export($config[$key], true));
-        }
-        
-        // Construir el array de métodos soportados
-        $supportedMethods = [];
-        if ($config['supports_redirect'] ?? false) {
-            $supportedMethods[] = 'redirect';
-        }
-        if ($config['supports_qr'] ?? false) {
-            $supportedMethods[] = 'qr';
-        }
-        if ($config['supports_terminal'] ?? false) {
-            $supportedMethods[] = 'terminal';
-        }
-        
-        if (!empty($supportedMethods)) {
-            $config['supported_methods'] = $supportedMethods;
-            Log::info('Métodos soportados construidos:', $supportedMethods);
-        }
-        
-        Log::info('Config final antes de JSON:', $config);
+        $config = PaymentProvider::normalizeConfig($configFields);
+        Log::info('Config normalizado en buildConfigJson:', $config);
         
         return $config;
     }
