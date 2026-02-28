@@ -292,6 +292,19 @@ class PaymentProviderController extends AdminController
         // Botón para obtener terminales
         $form->html($this->getMercadoPagoTerminalsModal());
         
+        // Sección: Configuración POS
+        $form->divider('Configuración POS')
+            ->attribute('data-mercado-pago-section', 'true')
+            ->attribute('style', 'display: none;');
+        
+        $form->text('config.external_pos_id', 'External POS ID')
+            ->placeholder('Ej: POS_002 o external_id del POS')
+            ->attribute('data-mercado-pago-field', 'true')
+            ->help('ID externo único del POS para identificarlo en Mercado Pago. <strong>REQUERIDO</strong> para modo de QR estático.');
+        
+        // Botón para obtener POS
+        $form->html($this->getMercadoPagoPoSModal());
+        
         $form->text('config.store_id', 'Store ID / POS ID')
             ->placeholder('Ej: 123456')
             ->attribute('data-mercado-pago-field', 'true')
@@ -363,6 +376,14 @@ class PaymentProviderController extends AdminController
     private function getMercadoPagoTerminalsModal(): string
     {
         return view('payment_provider.mp_terminals_modal')->render();
+    }
+
+    /**
+     * Modal HTML para obtener POS de Mercado Pago
+     */
+    private function getMercadoPagoPoSModal(): string
+    {
+        return view('payment_provider.mp_pos_modal')->render();
     }
 
 
@@ -512,6 +533,101 @@ HTML;
             
             return response()->json([
                 'error' => 'Error al obtener terminales: ' . $e->getMessage(),
+                'hint' => 'Revisa los logs para más detalles',
+            ], 500);
+        }
+    }
+
+    /**
+     * Obtener POS de Mercado Pago
+     */
+    public function getMercadoPagoPos()
+    {
+        $token = request()->input('token');
+        
+        if (!$token) {
+            return response()->json(['error' => 'Token requerido'], 400);
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client([
+                'timeout' => 10,
+            ]);
+            
+            // Endpoint para obtener POS
+            $endpoint = 'https://api.mercadopago.com/pos';
+            
+            try {
+                $response = $client->request('GET', $endpoint, [
+                    'headers' => [
+                        'Authorization' => 'Bearer ' . $token,
+                        'Content-Type' => 'application/json',
+                        'User-Agent' => 'Cinelar Admin',
+                    ],
+                    'http_errors' => false,
+                    'query' => [
+                        'limit' => 100,
+                    ]
+                ]);
+                
+                $statusCode = $response->getStatusCode();
+                
+                if ($statusCode >= 400) {
+                    $errorMsg = match($statusCode) {
+                        403 => 'Token sin permisos para acceder a POS (403)',
+                        401 => 'Token inválido o expirado (401)',
+                        404 => 'Endpoint no encontrado (404)',
+                        default => "Error HTTP $statusCode",
+                    };
+                    
+                    return response()->json([
+                        'error' => $errorMsg,
+                        'hint' => 'Verifica que el token sea válido y tenga permisos suficientes',
+                        'code' => $statusCode,
+                    ], 403);
+                }
+            } catch (\Exception $e) {
+                return response()->json([
+                    'error' => 'Error de conexión: ' . $e->getMessage(),
+                    'hint' => 'Revisa tu conexión y que el token sea válido',
+                ], 500);
+            }
+            
+            $data = json_decode($response->getBody(), true);
+            
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                return response()->json([
+                    'error' => 'Respuesta inválida de Mercado Pago',
+                    'hint' => 'La respuesta no es JSON válido',
+                ], 500);
+            }
+            
+            // Extraer POS de varias estructuras posibles
+            $posList = [];
+            
+            if (!empty($data['results'])) {
+                $posList = $data['results'];
+            } elseif (!empty($data['pos'])) {
+                $posList = $data['pos'];
+            } elseif (is_array($data) && count($data) > 0) {
+                // Si es un array directo de POS
+                $posList = $data;
+            }
+            
+            return response()->json([
+                'status' => 'success',
+                'pos' => $posList,
+                'count' => count($posList),
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error obtaining MP POS:', [
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+            
+            return response()->json([
+                'error' => 'Error al obtener POS: ' . $e->getMessage(),
                 'hint' => 'Revisa los logs para más detalles',
             ], 500);
         }

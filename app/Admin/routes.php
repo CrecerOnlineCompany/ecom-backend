@@ -41,5 +41,6 @@ Route::group([
     // Payment Providers
     $router->resource('payment-providers', 'PaymentProviderController');
     $router->post('payment-providers/mp-terminals', 'PaymentProviderController@getMercadoPagoTerminals')->name('payment-providers.mp-terminals');
+    $router->post('payment-providers/mp-pos', 'PaymentProviderController@getMercadoPagoPos')->name('payment-providers.mp-pos');
 
 });

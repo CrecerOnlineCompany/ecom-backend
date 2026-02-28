@@ -219,7 +219,7 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                 $mpOrder = $client->create($createData);
             } catch (MPApiException $sdkException) {
                 Log::error('MercadoPagoQR: Error creando Order QR (order-first)', [
-                    'message' => $sdkException->getMessage(),
+                    'message' => $sdkException->getApiResponse(),
                 ]);
                 throw new \Exception('Mercado Pago Order Error: ' . $sdkException->getMessage());
             }
@@ -353,67 +353,121 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
     {
         try {
             $data = $request->all();
+            $webhookId = \Illuminate\Support\Str::uuid();
             
             Log::info('MercadoPagoQR: Webhook recibido', [
+                'webhook_id' => $webhookId,
                 'data_keys' => array_keys($data),
+                'full_data' => json_encode($data),
+                'headers' => $request->headers->all(),
+                'method' => $request->method(),
+                'url' => $request->url(),
             ]);
 
             // Step 1: Extraer ID externo (puede venir en múltiples formatos)
             $externalId = $this->extractExternalId($data);
             if (empty($externalId)) {
-                Log::warning('MercadoPagoQR: Webhook sin ID identificable');
-                return true; // Procesar pero sin hacer nada
-            }
-
-            Log::info('MercadoPagoQR: ID externo extraído', [
-                'external_id' => $externalId,
-            ]);
-
-            // Step 2: Buscar PaymentProviderTicket
-            $paymentTicket = $this->findPaymentTicket($externalId, $data);
-            if (!$paymentTicket) {
-                Log::warning('MercadoPagoQR: PaymentProviderTicket no encontrado', [
-                    'external_id' => $externalId,
+                Log::warning('MercadoPagoQR: Webhook sin ID identificable', [
+                    'webhook_id' => $webhookId,
+                    'data_structure' => json_encode(array_keys($data)),
+                    'data' => json_encode($data),
                 ]);
                 return true; // Procesar pero sin hacer nada
             }
 
+            Log::info('MercadoPagoQR: ID externo extraído exitosamente', [
+                'webhook_id' => $webhookId,
+                'external_id' => $externalId,
+                'data_keys' => array_keys($data),
+            ]);
+
+            // Step 2: Buscar PaymentProviderTicket
+            Log::info('MercadoPagoQR: Buscando PaymentProviderTicket', [
+                'webhook_id' => $webhookId,
+                'external_id' => $externalId,
+            ]);
+            $paymentTicket = $this->findPaymentTicket($externalId, $data, $webhookId);
+            if (!$paymentTicket) {
+                Log::warning('MercadoPagoQR: PaymentProviderTicket no encontrado - PROBLEMA CRÍTICO', [
+                    'webhook_id' => $webhookId,
+                    'external_id' => $externalId,
+                    'all_request_data' => json_encode($data),
+                ]);
+                return true; // Procesar pero sin hacer nada
+            }
+            Log::info('MercadoPagoQR: PaymentProviderTicket encontrado', [
+                'webhook_id' => $webhookId,
+                'payment_ticket_id' => $paymentTicket->id,
+                'current_status' => $paymentTicket->status,
+                'transaction_id' => $paymentTicket->transaction_id,
+            ]);
+
             // Step 3: Obtener status del webhook
-            $status = $this->getPaymentStatusFromWebhook($data, $externalId);
+            Log::info('MercadoPagoQR: Obteniendo status del pago', [
+                'webhook_id' => $webhookId,
+                'external_id' => $externalId,
+                'payment_ticket_id' => $paymentTicket->id,
+            ]);
+            $status = $this->getPaymentStatusFromWebhook($data, $externalId, $webhookId);
             $mappedStatus = $this->mapPaymentStatus($status);
 
-            Log::info('MercadoPagoQR: Status mapeado', [
+            Log::info('MercadoPagoQR: Status obtenido y mapeado', [
+                'webhook_id' => $webhookId,
                 'payment_ticket_id' => $paymentTicket->id,
                 'transaction_id' => $externalId,
                 'original_status' => $status,
                 'mapped_status' => $mappedStatus,
                 'order_id' => $paymentTicket->order_id,
+                'previous_status' => $paymentTicket->status,
             ]);
 
             // Step 4: Procesar según status mapeado
+            Log::info('MercadoPagoQR: Iniciando Step 4 - Procesamiento por status', [
+                'webhook_id' => $webhookId,
+                'mapped_status' => $mappedStatus,
+                'payment_ticket_id' => $paymentTicket->id,
+            ]);
+            
             if ($mappedStatus === 'approved') {
                 try {
+                    Log::info('MercadoPagoQR: Intentando aprobar pago', [
+                        'webhook_id' => $webhookId,
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'external_id' => $externalId,
+                    ]);
+                    
                     $paymentTicket->approve([
                         'external_payment_id' => $externalId,
                         'webhook_data' => $data,
                         'qr_approved_at' => now()->toIso8601String(),
                     ]);
 
-                    Log::info('MercadoPagoQR: Pago QR aprobado', [
+                    Log::info('MercadoPagoQR: Pago QR aprobado exitosamente', [
+                        'webhook_id' => $webhookId,
                         'payment_ticket_id' => $paymentTicket->id,
                         'external_id' => $externalId,
+                        'order_id' => $paymentTicket->order_id,
                     ]);
                 } catch (\Exception $e) {
                     // approve() lanzó excepción = finalización falló
-                    Log::error('MercadoPagoQR: Error al aprobar pago QR', [
+                    Log::error('MercadoPagoQR: Error crítico al aprobar pago QR', [
+                        'webhook_id' => $webhookId,
                         'payment_ticket_id' => $paymentTicket->id,
                         'error' => $e->getMessage(),
+                        'error_trace' => $e->getTraceAsString(),
                         'external_id' => $externalId,
                     ]);
                     return false; // Reintentar webhook
                 }
             } else {
                 // No aprobado: update status sin llamar approve()
+                Log::info('MercadoPagoQR: Pago no aprobado - actualizando status sin finalizar', [
+                    'webhook_id' => $webhookId,
+                    'payment_ticket_id' => $paymentTicket->id,
+                    'new_status' => $mappedStatus,
+                    'original_status' => $status,
+                ]);
+                
                 $responseData = $paymentTicket->response_data ?? [];
                 $responseData = array_merge($responseData, [
                     'webhook_status' => $status,
@@ -428,25 +482,37 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                     ]);
 
                     Log::info('MercadoPagoQR: Status actualizado (no aprobado)', [
+                        'webhook_id' => $webhookId,
                         'payment_ticket_id' => $paymentTicket->id,
                         'external_id' => $externalId,
                         'new_status' => $mappedStatus,
                     ]);
                 } catch (\Exception $e) {
-                    Log::error('MercadoPagoQR: Error al actualizar pago', [
+                    Log::error('MercadoPagoQR: Error al actualizar pago en BD', [
+                        'webhook_id' => $webhookId,
                         'payment_ticket_id' => $paymentTicket->id,
                         'error' => $e->getMessage(),
+                        'error_trace' => $e->getTraceAsString(),
                     ]);
                     return false;
                 }
             }
 
+            Log::info('MercadoPagoQR: Webhook procesado exitosamente', [
+                'webhook_id' => $webhookId,
+                'payment_ticket_id' => $paymentTicket->id,
+                'final_status' => $mappedStatus,
+            ]);
+            
             return true;
 
         } catch (\Exception $e) {
             Log::error('MercadoPagoQR: Error inesperado procesando webhook', [
+                'webhook_id' => $webhookId ?? null,
                 'error' => $e->getMessage(),
-                'trace' => $e->getTraceAsString(),
+                'error_trace' => $e->getTraceAsString(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
             ]);
             return false;
         }
@@ -457,45 +523,111 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
      */
     private function extractExternalId(array $data): ?string
     {
-        if (isset($data['data']['id'])) {
-            return $data['data']['id'];
+        
+        // Intentar múltiples rutas posibles
+        $possiblePaths = [
+            $data['data']['id'] ?? null,
+            $data['id'] ?? null,
+            $data['resource']['id'] ?? null,
+            $data['data']['payment_id'] ?? null,
+            $data['payment_id'] ?? null,
+        ];
+        
+        foreach ($possiblePaths as $path) {
+            if (!empty($path)) {
+                Log::debug('MercadoPagoQR: ID extraído', [
+                    'found_id' => $path,
+                    'source_data_keys' => array_keys($data),
+                ]);
+                return $path;
+            }
         }
-        if (isset($data['id'])) {
-            return $data['id'];
-        }
+        
+        // Si no encontramos, loguear la estructura completa
+        Log::warning('MercadoPagoQR: No se pudo extraer ID de ningún path conocido', [
+            'data_structure' => json_encode($data),
+            'attempted_paths' => ['data.id', 'id', 'resource.id', 'data.payment_id', 'payment_id'],
+        ]);
+        
         return null;
     }
 
     /**
      * Buscar PaymentProviderTicket por transaction_id, external_reference o payment_provider_ticket_id
      */
-    private function findPaymentTicket(string $externalId, array $data): ?PaymentProviderTicket
+    private function findPaymentTicket(string $externalId, array $data, ?string $webhookId = null): ?PaymentProviderTicket
     {
         // Primero intentar con el método estático que busca transaction_id
+        Log::info('MercadoPagoQR: Buscando por transaction_id', [
+            'webhook_id' => $webhookId,
+            'external_id' => $externalId,
+        ]);
+        
         $paymentTicket = PaymentProviderTicket::findByTransactionOrId($externalId);
         
         if ($paymentTicket) {
+            Log::info('MercadoPagoQR: ✓ Encontrado por findByTransactionOrId', [
+                'webhook_id' => $webhookId,
+                'payment_ticket_id' => $paymentTicket->id,
+                'method' => 'findByTransactionOrId',
+            ]);
             return $paymentTicket;
         }
+        
+        Log::warning('MercadoPagoQR: No encontrado por findByTransactionOrId', [
+            'webhook_id' => $webhookId,
+            'external_id' => $externalId,
+        ]);
 
         // Intentar por external_reference en response_data (JSON)
         $externalReference = $data['external_reference'] ?? $data['data']['external_reference'] ?? null;
+        
+        Log::info('MercadoPagoQR: Intentando búsqueda por external_reference', [
+            'webhook_id' => $webhookId,
+            'external_reference' => $externalReference,
+        ]);
+        
         if (!empty($externalReference)) {
+            // Método 1: JSON contains en response_data
             $paymentTicket = PaymentProviderTicket::whereJsonContains('response_data->external_reference', $externalReference)->first();
             if ($paymentTicket) {
+                Log::info('MercadoPagoQR: ✓ Encontrado por JSON contains en response_data', [
+                    'webhook_id' => $webhookId,
+                    'payment_ticket_id' => $paymentTicket->id,
+                    'method' => 'json_contains',
+                ]);
                 return $paymentTicket;
             }
             
-            // Fallback: buscar en reference_number (si se usara)
+            Log::warning('MercadoPagoQR: No encontrado por JSON contains', [
+                'webhook_id' => $webhookId,
+                'external_reference' => $externalReference,
+            ]);
+            
+            // Método 2: Búsqueda directa en reference_number (si se usara)
             $paymentTicket = PaymentProviderTicket::where('reference_number', $externalReference)->first();
             if ($paymentTicket) {
+                Log::info('MercadoPagoQR: ✓ Encontrado por reference_number', [
+                    'webhook_id' => $webhookId,
+                    'payment_ticket_id' => $paymentTicket->id,
+                    'method' => 'reference_number',
+                ]);
                 return $paymentTicket;
             }
+            
+            Log::warning('MercadoPagoQR: No encontrado por reference_number', [
+                'webhook_id' => $webhookId,
+                'external_reference' => $externalReference,
+            ]);
         }
-
-        Log::warning('MercadoPagoQR: PaymentProviderTicket no encontrado', [
-            'transaction_id' => $externalId,
+        
+        // Log final - ningún método funcionó
+        Log::error('MercadoPagoQR: PaymentProviderTicket NO ENCONTRADO tras todos los intentos - ERROR CRÍTICO', [
+            'webhook_id' => $webhookId,
+            'external_id' => $externalId,
             'external_reference' => $externalReference,
+            'all_payment_tickets_count' => PaymentProviderTicket::count(),
+            'all_payment_tickets_sample' => PaymentProviderTicket::limit(5)->get(['id', 'transaction_id', 'status', 'payment_provider_id'])->toArray(),
         ]);
         
         return null;
@@ -504,60 +636,126 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
     /**
      * Obtener estado del pago desde el webhook o consultando MP API
      */
-    private function getPaymentStatusFromWebhook(array $data, string $externalId): ?string
+    private function getPaymentStatusFromWebhook(array $data, string $externalId, ?string $webhookId = null): ?string
     {
-        $status = $data['data']['status'] ?? $data['status'] ?? null;
+        // Intentar múltiples rutas para obtener status
+        $possibleStatuses = [
+            $data['data']['status'] ?? null,
+            $data['status'] ?? null,
+            $data['resource']['status'] ?? null,
+        ];
         
-        if (!empty($status)) {
-            return $status;
+        foreach ($possibleStatuses as $status) {
+            if (!empty($status)) {
+                Log::info('MercadoPagoQR: Status encontrado en webhook data', [
+                    'webhook_id' => $webhookId,
+                    'status' => $status,
+                    'source' => 'webhook_data',
+                ]);
+                return $status;
+            }
         }
+        
+        Log::warning('MercadoPagoQR: Status no encontrado en webhook data, consultando MP API', [
+            'webhook_id' => $webhookId,
+            'external_id' => $externalId,
+            'data_keys' => array_keys($data),
+        ]);
 
-        return $this->queryMercadoPagoStatus($externalId, $data);
+        return $this->queryMercadoPagoStatus($externalId, $data, $webhookId);
     }
 
     /**
      * Consultar estado a Mercado Pago API si no viene en el webhook
      * Detecta si es order o payment
      */
-    private function queryMercadoPagoStatus(string $externalId, array $data): ?string
+    private function queryMercadoPagoStatus(string $externalId, array $data, ?string $webhookId = null): ?string
     {
         try {
+            Log::info('MercadoPagoQR: Preparando consulta a MP API', [
+                'webhook_id' => $webhookId,
+                'external_id' => $externalId,
+            ]);
+            
             $resourceType = $this->detectResourceType($data);
             if (empty($resourceType)) {
-                Log::warning('MercadoPagoQR: No se pudo determinar tipo de recurso');
+                Log::error('MercadoPagoQR: No se pudo determinar tipo de recurso en webhook', [
+                    'webhook_id' => $webhookId,
+                    'data_keys' => array_keys($data),
+                    'data' => json_encode($data),
+                ]);
                 return null;
             }
+            
+            Log::info('MercadoPagoQR: Tipo de recurso detectado', [
+                'webhook_id' => $webhookId,
+                'resource_type' => $resourceType,
+                'external_id' => $externalId,
+            ]);
 
             $accessToken = $this->provider->getConfig('access_token');
             if (empty($accessToken)) {
+                Log::error('MercadoPagoQR: Access token no configurado para consultar API', [
+                    'webhook_id' => $webhookId,
+                ]);
                 return null;
             }
 
             $endpoint = "https://api.mercadopago.com/{$resourceType}/{$externalId}";
             
+            Log::info('MercadoPagoQR: Consultando MP API', [
+                'webhook_id' => $webhookId,
+                'endpoint' => $endpoint,
+            ]);
+            
             $response = Http::withToken($accessToken)->get($endpoint);
             
             if (!$response->successful()) {
-                Log::warning('MercadoPagoQR: Error consultando MP API', [
+                Log::error('MercadoPagoQR: Error consultando MP API - respuesta no exitosa', [
+                    'webhook_id' => $webhookId,
                     'status' => $response->status(),
                     'endpoint' => $endpoint,
+                    'response_body' => $response->body(),
                 ]);
                 return null;
             }
 
             $apiData = $response->json();
             
+            Log::info('MercadoPagoQR: Respuesta de MP API recibida', [
+                'webhook_id' => $webhookId,
+                'resource_type' => $resourceType,
+                'api_response_keys' => array_keys($apiData),
+            ]);
+            
             if ($resourceType === 'payments') {
-                return $apiData['status'] ?? null;
+                $status = $apiData['status'] ?? null;
+                Log::info('MercadoPagoQR: Status de pago obtenido del API', [
+                    'webhook_id' => $webhookId,
+                    'status' => $status,
+                ]);
+                return $status;
             } elseif ($resourceType === 'orders') {
-                return $apiData['status'] ?? null;
+                $status = $apiData['status'] ?? null;
+                Log::info('MercadoPagoQR: Status de orden obtenido del API', [
+                    'webhook_id' => $webhookId,
+                    'status' => $status,
+                ]);
+                return $status;
             }
 
+            Log::warning('MercadoPagoQR: Tipo de recurso no tiene handler para extraer status', [
+                'webhook_id' => $webhookId,
+                'resource_type' => $resourceType,
+            ]);
+            
             return null;
 
         } catch (\Exception $e) {
-            Log::warning('MercadoPagoQR: Error al consultar MP API', [
+            Log::error('MercadoPagoQR: Excepción al consultar MP API', [
+                'webhook_id' => $webhookId,
                 'error' => $e->getMessage(),
+                'error_trace' => $e->getTraceAsString(),
                 'external_id' => $externalId,
             ]);
             return null;
@@ -571,15 +769,28 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
     {
         $type = $data['type'] ?? $data['data']['type'] ?? null;
         
+        Log::debug('MercadoPagoQR: Detectando tipo de recurso', [
+            'type_value' => $type,
+            'data_keys' => array_keys($data),
+        ]);
+        
         if ($type === 'payment' || $type === 'payment.created' || $type === 'payment.updated') {
+            Log::debug('MercadoPagoQR: Tipo detectado: PAYMENT');
             return 'payments';
         }
         if ($type === 'order' || $type === 'order.created' || $type === 'order.updated') {
+            Log::debug('MercadoPagoQR: Tipo detectado: ORDER');
             return 'orders';
         }
         if ($type === 'merchant_order') {
+            Log::debug('MercadoPagoQR: Tipo detectado: MERCHANT_ORDER');
             return 'merchant_orders';
         }
+
+        Log::warning('MercadoPagoQR: No se pudo detectar tipo de recurso', [
+            'type_value' => $type,
+            'all_data_keys' => array_keys($data),
+        ]);
 
         return null;
     }
@@ -589,16 +800,29 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
      */
     private function mapPaymentStatus(string $status = null): string
     {
+        Log::debug('MercadoPagoQR: Mapeando status', [
+            'original_status' => $status,
+        ]);
+        
         if ($status === 'approved') {
+            Log::debug('MercadoPagoQR: Status mapeado a APPROVED');
             return 'approved';
         }
         if ($status === 'pending') {
+            Log::debug('MercadoPagoQR: Status mapeado a PENDING');
             return 'pending';
         }
         if (in_array($status, ['rejected', 'declined', 'cancelled', 'refunded'])) {
+            Log::debug('MercadoPagoQR: Status mapeado a DECLINED', [
+                'original_status' => $status,
+            ]);
             return 'declined';
         }
 
+        Log::warning('MercadoPagoQR: Status no reconocido, asignando PENDING por defecto', [
+            'status_received' => $status,
+        ]);
+        
         return 'pending';
     }
 
