@@ -5,7 +5,7 @@ namespace App\Services;
 use App\Models\Order;
 use App\Models\Ticket;
 use App\Models\ScreeningSeat;
-use App\Exceptions\InvalidOrderStateException;
+use App\Enums\PaymentStatus;
 use App\Exceptions\InvalidSeatOwnershipException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -20,7 +20,18 @@ use Illuminate\Support\Facades\Log;
  * - Marcar tickets como confirmed
  * - Marcar screening_seats como sold (con validación de ownership)
  * - Reparar estados parciales
- * - Ser 100% idempotente y  duplicate-safe para webhooks
+ * - Ser 100% idempotente y duplicate-safe para webhooks
+ * 
+ * Flujo ORDER-FIRST (from PaymentController):
+ * 1. StartOrderPaymentAction - Crea Order + reserva asientos en screening_seats
+ * 2. Pago se procesa (webhook)
+ * 3. OrderFinalizationService.finalizeOrderAfterApproval() - Crea/finaliza tickets
+ * 4. Limpia reservas provisionales
+ * 
+ * Consistencia con StartOrderPaymentAction:
+ * - Query reservas: where(order_id + status='reserved' + reserved_until >= now())
+ * - Crea tickets con status=PENDING, luego transiciona a COMPLETED
+ * - Distribuye total_amount entre cantidad de asientos
  * 
  * Garantías:
  * - Idempotencia: detecta si ya está finalizado y sale early
@@ -35,6 +46,9 @@ class OrderFinalizationService
 
     /**
      * Finalize order after payment approval
+     * 
+     * MEJORADO: Si no hay tickets pero hay asientos reservados, los crea primero
+     * Esto maneja el caso donde FinalizeOrderPaymentAction no fue llamada
      * 
      * @param int $orderId
      * @param array $paymentData Must contain 'transaction_id' and optionally 'provider_id', 'approval_date'
@@ -57,13 +71,35 @@ class OrderFinalizationService
                 ->orderBy('ticket_sequence', 'asc')  // Deterministic order
                 ->get();
 
+            // MEJORADO: Si no hay tickets, crear desde reservas de asientos
             if ($tickets->isEmpty()) {
-                Log::error("Order has no tickets for finalization", ['order_id' => $orderId]);
-                return [
-                    'success' => false,
-                    'message' => 'Order has no tickets to finalize',
-                    'error_code' => 'NO_TICKETS',
-                ];
+                Log::warning("Order has no tickets, attempting to create from reservations", [
+                    'order_id' => $orderId,
+                ]);
+
+                $createResult = $this->createTicketsFromReservations($order);
+                if (!$createResult['success']) {
+                    Log::error("Failed to create tickets from reservations", [
+                        'order_id' => $orderId,
+                        'error' => $createResult['error'],
+                    ]);
+                    return [
+                        'success' => false,
+                        'message' => 'Order has no tickets and no reserved seats to create from',
+                        'error_code' => 'NO_TICKETS_OR_RESERVATIONS',
+                    ];
+                }
+
+                Log::info("Tickets created from reservations", [
+                    'order_id' => $orderId,
+                    'created_count' => $createResult['created_count'],
+                ]);
+
+                // Reload tickets after creation
+                $tickets = Ticket::where('order_id', $orderId)
+                    ->lockForUpdate()
+                    ->orderBy('ticket_sequence', 'asc')
+                    ->get();
             }
 
             Log::info("Order loaded for finalization", [
@@ -155,7 +191,7 @@ class OrderFinalizationService
                     $ticket->update([
                         'ticket_number' => $ticketNumber,
                         'qr_code' => $qrCode,
-                        'status' => 'confirmed',
+                        'status' => PaymentStatus::STATUS_COMPLETED,
                         'purchased_at' => now(),
                     ]);
 
@@ -183,7 +219,7 @@ class OrderFinalizationService
 
                 // Step 6: Update order status and payment_data
                 $orderUpdate = [
-                    'status' => 'completed',
+                    'status' => PaymentStatus::STATUS_COMPLETED,
                     'completed_at' => now(),
                 ];
 
@@ -205,6 +241,9 @@ class OrderFinalizationService
                 ]);
 
                 DB::commit();
+
+                // Step 7: Clean up provisioned reservations (outside transaction, best effort)
+                $this->deleteReservationsAfterFinalization($order);
 
                 return [
                     'success' => true,
@@ -256,10 +295,10 @@ class OrderFinalizationService
         $partial = false;
 
         foreach ($tickets as $ticket) {
-            if ($ticket->status !== 'confirmed') {
+            if ($ticket->status !== PaymentStatus::STATUS_COMPLETED) {
                 $fully_finalized = false;
                 $partial = true;
-                $issues[] = "Ticket {$ticket->id} status is {$ticket->status}, not confirmed";
+                $issues[] = "Ticket {$ticket->id} status is {$ticket->status}, not " . PaymentStatus::STATUS_COMPLETED;
             }
 
             if (is_null($ticket->ticket_number)) {
@@ -295,7 +334,7 @@ class OrderFinalizationService
         }
 
         // Check order status
-        if ($order->status !== 'completed') {
+        if ($order->status !== PaymentStatus::STATUS_COMPLETED) {
             if (!$fully_finalized) {
                 $partial = true;
             }
@@ -313,7 +352,7 @@ class OrderFinalizationService
      */
     private function isTicketFullyFinalized(Ticket $ticket): bool
     {
-        return $ticket->status === 'confirmed'
+        return $ticket->status === PaymentStatus::STATUS_COMPLETED
             && !is_null($ticket->ticket_number)
             && !is_null($ticket->qr_code);
     }
@@ -333,7 +372,7 @@ class OrderFinalizationService
 
         try {
             foreach ($tickets as $ticket) {
-                if ($ticket->status !== 'confirmed') {
+                if ($ticket->status !== PaymentStatus::STATUS_COMPLETED) {
                     // Don't try to repair non-confirmed tickets in a repair operation
                     continue;
                 }
@@ -584,4 +623,146 @@ class OrderFinalizationService
             throw $e;
         }
     }
+
+    /**
+     * Create tickets from reserved seats (when they don't exist yet)
+     * 
+     * This handles the case where FinalizeOrderPaymentAction was not called
+     * but the order has reserved seats in screening_seats table
+     * 
+     * Consistent with StartOrderPaymentAction:
+     * - Query: ScreeningSeat where order_id={order_id}, status='reserved', reserved_until >= now()
+     * - Creates: Ticket with status=PENDING (will be confirmed in finalization)
+     * - One ticket per reserved seat with distributed price
+     * 
+     * @param Order $order
+     * @return array ['success' => bool, 'created_count' => int, 'error' => ?string]
+     */
+    private function createTicketsFromReservations(Order $order): array
+    {
+        try {
+            DB::beginTransaction();
+
+            // Get all reserved seats for this order (consistent with StartOrderPaymentAction)
+            // Filter: order_id + status='reserved' + reserved_until not expired
+            $reservedSeats = ScreeningSeat::where('order_id', $order->id)
+                ->where('status', 'reserved')
+                ->where(function ($query) {
+                    // Include seats with valid reservation (reserved_until >= now())
+                    $query->whereNull('reserved_until')  // No TTL = never expires
+                        ->orWhere('reserved_until', '>=', now());
+                })
+                ->lockForUpdate()
+                ->get();
+
+            if ($reservedSeats->isEmpty()) {
+                Log::warning("No reserved seats found for order", ['order_id' => $order->id]);
+                DB::rollBack();
+                return [
+                    'success' => false,
+                    'created_count' => 0,
+                    'error' => 'No reserved seats found for this order',
+                ];
+            }
+
+            Log::info("Creating tickets from reserved seats", [
+                'order_id' => $order->id,
+                'reserved_seat_count' => $reservedSeats->count(),
+            ]);
+
+            $createdCount = 0;
+            $sequence = 1;
+
+            // Create one ticket per reserved seat (consistent with StartOrderPaymentAction)
+            foreach ($reservedSeats as $screeningSeat) {
+                // Create ticket with PENDING status initially
+                // Will be transitioned to COMPLETED in finalization step
+                $ticket = Ticket::create([
+                    'screening_id' => $order->screening_id,
+                    'seat_id' => $screeningSeat->seat_id,
+                    'user_id' => $order->user_id,
+                    'order_id' => $order->id,
+                    'ticket_sequence' => $sequence,
+                    'status' => PaymentStatus::STATUS_PENDING,  // Will be confirmed in finalization
+                    'price' => $order->total_amount / $reservedSeats->count(),
+                    'customer_email' => $order->customer_email,
+                    'customer_name' => $order->customer_name,
+                    'customer_phone' => $order->customer_phone,
+                    'ip_address' => $order->ip_address ?? null,
+                    'payment_method' => null,  // Will be set during finalization
+                ]);
+
+                Log::info("Ticket created from reservation", [
+                    'ticket_id' => $ticket->id,
+                    'order_id' => $order->id,
+                    'seat_id' => $screeningSeat->seat_id,
+                    'sequence' => $sequence,
+                ]);
+
+                $sequence++;
+                $createdCount++;
+            }
+
+            DB::commit();
+
+            return [
+                'success' => true,
+                'created_count' => $createdCount,
+            ];
+
+        } catch (\Exception $e) {
+            DB::rollBack();
+            Log::error("Error creating tickets from reservations", [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
+            return [
+                'success' => false,
+                'created_count' => 0,
+                'error' => $e->getMessage(),
+            ];
+        }
+    }
+
+    /**
+     * Delete reservations after tickets are created/finalized
+     * 
+     * Called after successful ticket finalization to clean up screening_seats
+     * entries that are no longer needed (transition from provisional to finalized state)
+     * 
+     * After finalization, reserved seats should have already been transitioned to 'sold'
+     * by markSeatAsSold(). Any remaining 'reserved' entries are artifacts that can safely be deleted.
+     * 
+     * Note: We don't filter by reserved_until here because:
+     * - This is a post-finalization cleanup operation
+     * - Reserved seats should already be 'sold' at this point
+     * - Any 'reserved' entries here are orphaned artifacts
+     * 
+     * @param Order $order
+     * @return void
+     */
+    private function deleteReservationsAfterFinalization(Order $order): void
+    {
+        try {
+            // Delete all remaining 'reserved' seats (should be artifacts/orphans)
+            // Consistent with StartOrderPaymentAction that creates them
+            $deleted = ScreeningSeat::where('order_id', $order->id)
+                ->where('status', 'reserved')
+                ->delete();
+
+            if ($deleted > 0) {
+                Log::info("Deleted provisional reservations after finalization", [
+                    'order_id' => $order->id,
+                    'deleted_count' => $deleted,
+                ]);
+            }
+        } catch (\Exception $e) {
+            Log::warning("Could not delete provisional reservations", [
+                'order_id' => $order->id,
+                'error' => $e->getMessage(),
+            ]);
+            // Don't throw - this is a cleanup operation
+        }
+    }
 }
+

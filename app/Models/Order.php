@@ -101,6 +101,14 @@ class Order extends Model
     }
 
     /**
+     * Relación: Order tiene muchos ScreeningSeat (asientos reservados/vendidos)
+     */
+    public function screeningSeats(): HasMany
+    {
+        return $this->hasMany(ScreeningSeat::class);
+    }
+
+    /**
      * Acceso a la película a través de screening
      */
     public function movie()

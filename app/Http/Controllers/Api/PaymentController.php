@@ -7,18 +7,22 @@ use App\Models\Order;
 use App\Models\Ticket;
 use App\Models\Screening;
 use App\Models\PaymentProviderTicket;
+use App\Models\PaymentProvider;
 use App\Actions\Payments\StartOrderPaymentAction;
 use App\Actions\Payments\FinalizeOrderPaymentAction;
 use App\Actions\Payments\CancelOrderPaymentAction;
 use App\Actions\Orders\ExpireOrdersAction;
+use App\Enums\PaymentStatus;
 use App\Services\PaymentProviders\PaymentProviderManager;
 use App\Services\PaymentMethods\PaymentMethodService;
 use App\Services\OrderNumberGenerator;
+use App\Services\OrderFinalizationService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 
 class PaymentController extends Controller
@@ -587,6 +591,132 @@ class PaymentController extends Controller
     }
 
     /**
+     * Obtener detalle completo de una orden por número de orden.
+     * Incluye: orden, pagos relacionados y tickets relacionados.
+     */
+    public function orderDetails(string $orderNumber): JsonResponse
+    {
+        try {
+            $order = Order::where('order_number', $orderNumber)
+                ->with([
+                    'screening.movie',
+                    'screening.room.cinema',
+                    'tickets' => function ($query) {
+                        $query->with('details')->orderBy('id');
+                    },
+                    'paymentProviderTickets' => function ($query) {
+                        $query->with('paymentProvider')->orderByDesc('id');
+                    },
+                ])
+                ->first();
+
+            if (!$order) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Orden no encontrada',
+                ], 404);
+            }
+
+            $payments = $order->paymentProviderTickets->map(function ($payment) {
+                return [
+                    'id' => $payment->id,
+                    'status' => $payment->status,
+                    'transaction_id' => $payment->transaction_id,
+                    'reference_number' => $payment->reference_number,
+                    'payment_provider_id' => $payment->payment_provider_id,
+                    'payment_provider_name' => $payment->paymentProvider?->name,
+                    'initiated_at' => $payment->initiated_at?->toIso8601String(),
+                    'completed_at' => $payment->completed_at?->toIso8601String(),
+                    'created_at' => $payment->created_at?->toIso8601String(),
+                    'updated_at' => $payment->updated_at?->toIso8601String(),
+                    'response_data' => $payment->response_data,
+                ];
+            });
+
+            $tickets = $order->tickets->map(function ($ticket) {
+                return [
+                    'id' => $ticket->id,
+                    'ticket_number' => $ticket->ticket_number,
+                    'status' => $ticket->status,
+                    'price' => $ticket->price,
+                    'qr_code' => $ticket->qr_code,
+                    'customer_name' => $ticket->customer_name,
+                    'customer_email' => $ticket->customer_email,
+                    'customer_phone' => $ticket->customer_phone,
+                    'created_at' => $ticket->created_at?->toIso8601String(),
+                    'updated_at' => $ticket->updated_at?->toIso8601String(),
+                    'details' => $ticket->details->map(function ($detail) {
+                        return [
+                            'id' => $detail->id,
+                            'seat_id' => $detail->seat_id,
+                            'seat_code' => $detail->seat_code,
+                            'row_number' => $detail->row_number,
+                            'seat_number' => $detail->seat_number,
+                            'price' => $detail->price,
+                            'status' => $detail->status,
+                            'qr_code' => $detail->qr_code,
+                            'used_at' => $detail->used_at?->toIso8601String(),
+                        ];
+                    })->values(),
+                ];
+            });
+
+            return response()->json([
+                'success' => true,
+                'order' => [
+                    'id' => $order->id,
+                    'uuid' => $order->uuid,
+                    'order_number' => $order->order_number,
+                    'status' => $order->status,
+                    'total_amount' => $order->total_amount,
+                    'currency' => $order->currency,
+                    'customer_name' => $order->customer_name,
+                    'customer_email' => $order->customer_email,
+                    'customer_phone' => $order->customer_phone,
+                    'purchase_device' => $order->purchase_device,
+                    'reserved_until' => $order->reserved_until?->toIso8601String(),
+                    'paid_at' => $order->paid_at?->toIso8601String(),
+                    'cancelled_at' => $order->cancelled_at?->toIso8601String(),
+                    'created_at' => $order->created_at?->toIso8601String(),
+                    'updated_at' => $order->updated_at?->toIso8601String(),
+                    'screening' => [
+                        'id' => $order->screening?->id,
+                        'start_time' => $order->screening?->start_time?->toIso8601String(),
+                        'format' => $order->screening?->format,
+                        'movie' => [
+                            'id' => $order->screening?->movie?->id,
+                            'title' => $order->screening?->movie?->title,
+                        ],
+                        'room' => [
+                            'id' => $order->screening?->room?->id,
+                            'name' => $order->screening?->room?->name,
+                            'cinema' => [
+                                'id' => $order->screening?->room?->cinema?->id,
+                                'name' => $order->screening?->room?->cinema?->name,
+                            ],
+                        ],
+                    ],
+                ],
+                'payments' => $payments->values(),
+                'payments_count' => $payments->count(),
+                'tickets' => $tickets->values(),
+                'tickets_count' => $tickets->count(),
+            ]);
+        } catch (\Exception $e) {
+            Log::error('orderDetails error', [
+                'order_number' => $orderNumber,
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Error obteniendo detalle de la orden',
+                'error' => app()->environment('production') ? null : $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
      * Procesar pago por código QR (Mercado Pago QR)
      * ORDER-FIRST: Crea orden si no hay activa, reutiliza si existe con mismo idempotency_key
      * 
@@ -857,6 +987,411 @@ class PaymentController extends Controller
                 'success' => false,
                 'message' => $e->getMessage(),
             ], 500);
+        }
+    }
+
+    /**
+     * Verificación manual del estado de pago en Mercado Pago
+     * 
+     * Este endpoint permite al frontend verificar manualmente el estado de un pago
+     * cuando el webhook podría haber fallado. Consulta directamente a Mercado Pago
+     * y actualiza el estado en la base de datos si es necesario.
+     * 
+     * @param Request $request
+     * @return JsonResponse
+     */
+    public function manualCheckPaymentStatus(Request $request): JsonResponse
+    {
+        try {
+            Log::info("=== MANUAL PAYMENT CHECK INICIADO ===", [
+                'request_data' => $request->all(),
+            ]);
+
+            // Validar la solicitud
+            $validated = $request->validate([
+                'payment_ticket_id' => 'required|exists:payment_provider_tickets,id',
+                'order_number' => 'required|exists:orders,order_number',
+                'order_id' => 'required|exists:orders,id',
+                'payment_provider_id' => 'required|exists:payment_providers,id',
+            ]);
+
+            // Obtener el PaymentProviderTicket
+            $paymentTicket = PaymentProviderTicket::with([
+                'order.screening.movie',
+                'paymentProvider'
+            ])->findOrFail($validated['payment_ticket_id']);
+
+            // Validar que pertenezcan a la misma orden
+            if ($paymentTicket->order_id != $validated['order_id']) {
+                Log::warning('Manual check: Payment ticket does not belong to order', [
+                    'payment_ticket_id' => $validated['payment_ticket_id'],
+                    'payment_order_id' => $paymentTicket->order_id,
+                    'requested_order_id' => $validated['order_id'],
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'El pago no pertenece a la orden especificada',
+                ], 422);
+            }
+
+            // Obtener la orden
+            $order = $paymentTicket->order;
+
+            if (!$order) {
+                Log::warning('Manual check: Order not found', [
+                    'payment_ticket_id' => $validated['payment_ticket_id'],
+                    'order_id' => $validated['order_id'],
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Orden no encontrada',
+                ], 404);
+            }
+
+            // Validar que sea Mercado Pago
+            if ($paymentTicket->paymentProvider?->name !== 'mercado_pago') {
+                Log::warning('Manual check: Payment provider is not mercado_pago', [
+                    'payment_ticket_id' => $validated['payment_ticket_id'],
+                    'provider' => $paymentTicket->paymentProvider?->name,
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Este endpoint solo funciona con Mercado Pago',
+                ], 422);
+            }
+
+            // Obtener el transaction_id (orderId en Mercado Pago)
+            $transactionId = $paymentTicket->transaction_id;
+
+            if (empty($transactionId)) {
+                Log::warning('Manual check: Payment has no transaction_id', [
+                    'payment_ticket_id' => $validated['payment_ticket_id'],
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'El pago no tiene ID de transacción en Mercado Pago',
+                ], 422);
+            }
+
+            // Consultar estado en Mercado Pago
+            Log::info("Manual check: Consultando estado en Mercado Pago", [
+                'transaction_id' => $transactionId,
+                'payment_ticket_id' => $validated['payment_ticket_id'],
+            ]);
+
+            $mpStatus = $this->getOrderStatusFromMercadoPago($transactionId);
+
+            if ($mpStatus === null) {
+                Log::warning('Manual check: No se pudo obtener estado de MP', [
+                    'transaction_id' => $transactionId,
+                    'payment_ticket_id' => $validated['payment_ticket_id'],
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No se pudo verificar el estado en Mercado Pago',
+                    'status' => 'unknown',
+                    'order' => [
+                        'id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'status' => $order->status,
+                    ],
+                    'payment' => [
+                        'id' => $paymentTicket->id,
+                        'status' => $paymentTicket->status,
+                        'transaction_id' => $transactionId,
+                        'provider' => 'mercado_pago',
+                    ],
+                ], 422);
+            }
+
+            // Mapear estado de Mercado Pago
+            $newStatus = $this->mapMercadoPagoStatus($mpStatus);
+            $oldStatus = $paymentTicket->status;
+            $statusChanged = $newStatus !== $oldStatus;
+
+            Log::info("Manual check: Estado obtenido de MP", [
+                'transaction_id' => $transactionId,
+                'mercado_pago_status' => $mpStatus,
+                'mapped_status' => $newStatus,
+                'old_status' => $oldStatus,
+                'status_changed' => $statusChanged,
+            ]);
+
+            // Si el estado cambió, actualizar
+            if ($statusChanged) {
+                try {
+                    // Obtener datos completos del pago de Mercado Pago
+                    $paymentData = $this->getPaymentDataFromMercadoPago($transactionId);
+
+                    // Actualizar PaymentProviderTicket
+                    $paymentTicket->update([
+                        'status' => $newStatus,
+                        'completed_at' => $newStatus === PaymentStatus::STATUS_COMPLETED ? now() : null,
+                    ]);
+
+                    // Guardar info completa en order->payment_data
+                    if ($order) {
+                        $paymentDataInOrder = $order->payment_data ?? [];
+                        
+                        $paymentDataInOrder['mercadopago'] = [
+                            'transaction_id' => $transactionId,
+                            'status' => $newStatus,
+                            'mercadopago_status' => $mpStatus,
+                            'payment_data' => $paymentData,
+                            'last_sync_at' => now()->toIso8601String(),
+                            'manual_check_at' => now()->toIso8601String(),
+                        ];
+                        
+                        $order->update([
+                            'payment_data' => $paymentDataInOrder,
+                        ]);
+
+                        Log::debug('Manual check: Payment data saved to Order', [
+                            'order_id' => $order->id,
+                            'payment_ticket_id' => $paymentTicket->id,
+                            'transaction_id' => $transactionId,
+                        ]);
+                    }
+
+                    Log::info('Manual check: Status actualizado', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'order_id' => $order->id,
+                        'old_status' => $oldStatus,
+                        'new_status' => $newStatus,
+                    ]);
+
+                    // Si el pago está completado, finalizar la orden
+                    if ($newStatus === PaymentStatus::STATUS_COMPLETED && $order->id) {
+                        try {
+                            $finalizationService = app(OrderFinalizationService::class);
+                            $result = $finalizationService->finalizeOrderAfterApproval(
+                                $order->id,
+                                [
+                                    'transaction_id' => $transactionId,
+                                    'status' => $newStatus,
+                                    'mercadopago_status' => $mpStatus,
+                                    'manual_check' => true,
+                                ]
+                            );
+
+                            if ($result['success']) {
+                                Log::info('Manual check: Order finalized successfully', [
+                                    'order_id' => $order->id,
+                                    'payment_ticket_id' => $paymentTicket->id,
+                                    'tickets_created' => $result['finalized_tickets'] ?? 0,
+                                ]);
+                            } else {
+                                Log::warning('Manual check: Order finalization failed', [
+                                    'order_id' => $order->id,
+                                    'payment_ticket_id' => $paymentTicket->id,
+                                    'message' => $result['message'] ?? 'Unknown error',
+                                ]);
+                            }
+                        } catch (\Exception $e) {
+                            Log::error('Manual check: Exception finalizing order', [
+                                'order_id' => $order->id,
+                                'payment_ticket_id' => $paymentTicket->id,
+                                'error' => $e->getMessage(),
+                            ]);
+                        }
+                    }
+
+                } catch (\Exception $e) {
+                    Log::error('Manual check: Error actualizando estado', [
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'error' => $e->getMessage(),
+                        'trace' => $e->getTraceAsString(),
+                    ]);
+
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Error al actualizar el estado del pago',
+                        'details' => app()->environment('production') ? null : $e->getMessage(),
+                    ], 500);
+                }
+            }
+
+            // Recargar orden con estado actualizado
+            $order->refresh();
+            $paymentTicket->refresh();
+
+            return response()->json([
+                'success' => true,
+                'status' => $newStatus,
+                'message' => match($newStatus) {
+                    PaymentStatus::STATUS_COMPLETED => 'Pago confirmado en Mercado Pago',
+                    PaymentStatus::STATUS_PROCESSING => 'Pago en proceso',
+                    PaymentStatus::STATUS_PENDING => 'Pago pendiente',
+                    PaymentStatus::STATUS_FAILED => 'Pago rechazado',
+                    default => 'Estado del pago actualizado',
+                },
+                'status_changed' => $statusChanged,
+                'order' => [
+                    'id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'status' => $order->status,
+                ],
+                'payment' => [
+                    'id' => $paymentTicket->id,
+                    'status' => $newStatus,
+                    'transaction_id' => $transactionId,
+                    'provider' => 'mercado_pago',
+                    'approved_at' => $paymentTicket->completed_at?->toIso8601String(),
+                ],
+            ]);
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Datos de entrada inválidos',
+                'errors' => $e->errors(),
+            ], 422);
+
+        } catch (\Exception $e) {
+            Log::error('Manual check payment status error', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Error interno al verificar el estado del pago',
+                'error' => app()->environment('production') ? null : $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Obtener estado de una orden en Mercado Pago
+     * (Reutilizado del comando CheckMercadoPagoPending)
+     */
+    private function getOrderStatusFromMercadoPago(string $orderId): ?string
+    {
+        try {
+            $accessToken = $this->getMercadoPagoToken();
+            
+            $response = Http::withToken($accessToken)
+                ->get("https://api.mercadopago.com/v1/orders/{$orderId}");
+
+            if (!$response->successful()) {
+                Log::warning('getOrderStatusFromMercadoPago: Error en respuesta de API MP', [
+                    'order_id' => $orderId,
+                    'status_code' => $response->status(),
+                    'body' => $response->body(),
+                ]);
+                return null;
+            }
+
+            $order = $response->json();
+
+            // Buscar en transactions.payments (estructura de API MP)
+            if (isset($order['transactions']['payments']) && !empty($order['transactions']['payments'])) {
+                $lastPayment = collect($order['transactions']['payments'])->last();
+                
+                if ($lastPayment && isset($lastPayment['status'])) {
+                    Log::info('getOrderStatusFromMercadoPago: Estado obtenido de transactions.payments', [
+                        'order_id' => $orderId,
+                        'payment_status' => $lastPayment['status'],
+                        'status_detail' => $lastPayment['status_detail'] ?? null,
+                    ]);
+                    return $lastPayment['status'];
+                }
+            }
+
+            // Fallback: Si no hay pagos, usar estado de la orden
+            if (isset($order['status'])) {
+                Log::info('getOrderStatusFromMercadoPago: Usando estado de la orden', [
+                    'order_id' => $orderId,
+                    'order_status' => $order['status'],
+                ]);
+                return $order['status'];
+            }
+
+            Log::warning('getOrderStatusFromMercadoPago: No se encontró status en respuesta de MP', [
+                'order_id' => $orderId,
+                'response_keys' => array_keys($order),
+            ]);
+            return null;
+
+        } catch (\Exception $e) {
+            Log::error('getOrderStatusFromMercadoPago: Error inesperado', [
+                'order_id' => $orderId,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
+        }
+    }
+
+    /**
+     * Obtener token de acceso de Mercado Pago
+     */
+    private function getMercadoPagoToken(): string
+    {
+        return PaymentProvider::where('name', 'mercado_pago')
+            ->where('is_active', true)
+            ->first()
+            ->getConfig('access_token');
+    }
+
+    /**
+     * Mapear estado de Mercado Pago a estado local
+     */
+    private function mapMercadoPagoStatus(string $mpStatus): string
+    {
+        return match($mpStatus) {
+            'approved' => PaymentStatus::STATUS_COMPLETED,
+            'processed' => PaymentStatus::STATUS_COMPLETED,
+            'authorized' => PaymentStatus::STATUS_PROCESSING,
+            'pending' => PaymentStatus::STATUS_PENDING,
+            'pending_review' => PaymentStatus::STATUS_PENDING,
+            'pending_cardholder_action' => PaymentStatus::STATUS_PENDING,
+            'pending_payment_in_wallet' => PaymentStatus::STATUS_PENDING,
+            'processing' => PaymentStatus::STATUS_PROCESSING,
+            'in_mediation' => PaymentStatus::STATUS_PENDING,
+            'rejected' => PaymentStatus::STATUS_FAILED,
+            'cancelled' => PaymentStatus::STATUS_FAILED,
+            'refunded' => PaymentStatus::STATUS_REFUNDED,
+            'partially_refunded' => PaymentStatus::STATUS_PENDING,
+            'disputed' => PaymentStatus::STATUS_PENDING,
+            default => PaymentStatus::STATUS_PENDING,
+        };
+    }
+
+    /**
+     * Obtener datos completos del pago de Mercado Pago
+     */
+    private function getPaymentDataFromMercadoPago(string $orderId): ?array
+    {
+        try {
+            $accessToken = $this->getMercadoPagoToken();
+            
+            $response = Http::withToken($accessToken)
+                ->get("https://api.mercadopago.com/v1/orders/{$orderId}");
+
+            if (!$response->successful()) {
+                return null;
+            }
+
+            $order = $response->json();
+
+            // Obtener el último pago de transactions.payments
+            if (isset($order['transactions']['payments']) && !empty($order['transactions']['payments'])) {
+                return collect($order['transactions']['payments'])->last();
+            }
+
+            return null;
+
+        } catch (\Exception $e) {
+            Log::error('getPaymentDataFromMercadoPago: Error obteniendo datos del pago', [
+                'order_id' => $orderId,
+                'error' => $e->getMessage(),
+            ]);
+            return null;
         }
     }
 
