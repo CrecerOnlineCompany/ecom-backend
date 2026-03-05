@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Screening;
+use App\Models\ScreeningSeat;
 use App\Models\Room;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -97,20 +98,27 @@ class ScreeningController extends Controller
 
     /**
      * Get available seats for a screening
-     * Excluye: tickets confirmados + tickets pending_payment (en proceso)
+     * Fuente de verdad: screening_seats (order-first inventory)
+     * Excluye asientos SOLD y RESERVED vigentes (no expirados)
      */
     public function availableSeats(Screening $screening): JsonResponse
     {
-        // Obtener asientos que están:
-        // - Confirmados (ya pagados)
-        // - En proceso de pago (pending_payment, processing)
-        $bookedSeats = $screening->tickets()
-            ->whereIn('status', ['confirmed', 'pending_payment', 'processing'])
+        $blockedSeatIds = ScreeningSeat::where('screening_id', $screening->id)
+            ->where(function ($query) {
+                $query->where('status', ScreeningSeat::STATUS_SOLD)
+                    ->orWhere(function ($reservedQuery) {
+                        $reservedQuery->where('status', ScreeningSeat::STATUS_RESERVED)
+                            ->where(function ($ttlQuery) {
+                                $ttlQuery->whereNull('reserved_until')
+                                    ->orWhere('reserved_until', '>=', now());
+                            });
+                    });
+            })
             ->pluck('seat_id')
             ->toArray();
         
         $availableSeats = $screening->room->seats()
-            ->whereNotIn('id', $bookedSeats)
+            ->whereNotIn('id', $blockedSeatIds)
             ->where('is_active', true)
             ->select('id', 'seat_code', 'type', 'row_number', 'seat_number')
             ->get();
@@ -118,7 +126,7 @@ class ScreeningController extends Controller
         return response()->json([
             'screening_id' => $screening->id,
             'total_seats' => $screening->room->total_seats,
-            'booked_seats_count' => count($bookedSeats),
+            'booked_seats_count' => count($blockedSeatIds),
             'available_seats_count' => $availableSeats->count(),
             'seats' => $availableSeats,
         ]);

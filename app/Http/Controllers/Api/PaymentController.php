@@ -17,6 +17,7 @@ use App\Services\PaymentProviders\PaymentProviderManager;
 use App\Services\PaymentMethods\PaymentMethodService;
 use App\Services\OrderNumberGenerator;
 use App\Services\OrderFinalizationService;
+use App\Services\SeatInventoryService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -32,19 +33,22 @@ class PaymentController extends Controller
     protected FinalizeOrderPaymentAction $finalizeOrderPayment;
     protected CancelOrderPaymentAction $cancelOrderPayment;
     protected ExpireOrdersAction $expireOrders;
+    protected SeatInventoryService $inventoryService;
 
     public function __construct(
         PaymentProviderManager $paymentManager,
         StartOrderPaymentAction $startOrderPayment,
         FinalizeOrderPaymentAction $finalizeOrderPayment,
         CancelOrderPaymentAction $cancelOrderPayment,
-        ExpireOrdersAction $expireOrders
+        ExpireOrdersAction $expireOrders,
+        SeatInventoryService $inventoryService
     ) {
         $this->paymentManager = $paymentManager;
         $this->startOrderPayment = $startOrderPayment;
         $this->finalizeOrderPayment = $finalizeOrderPayment;
         $this->cancelOrderPayment = $cancelOrderPayment;
         $this->expireOrders = $expireOrders;
+        $this->inventoryService = $inventoryService;
     }
 
     public function index(): JsonResponse
@@ -326,7 +330,43 @@ class PaymentController extends Controller
                     ]);
                 }
 
-                // PASO 3: Para terminal (smart), cancelar último payment_provider_ticket activo
+                // PASO 3: Garantizar inventario y reservar asientos para la orden
+                $this->inventoryService->ensureScreeningSeats($screening->id);
+
+                // Si se reutiliza orden, limpiar reservas anteriores antes de reservar nuevos asientos
+                if ($activeOrder && in_array($activeOrder->status, [
+                    Order::STATUS_RESERVED,
+                    Order::STATUS_PAYMENT_PROCESSING,
+                ])) {
+                    $this->inventoryService->releaseSeatsByOrder(
+                        $order->id,
+                        'order_refreshed_before_new_reservation'
+                    );
+                }
+
+                $reservationResult = $this->inventoryService->reserveSeats(
+                    screening_id: $screening->id,
+                    seat_ids: $seatIds,
+                    holder_type: 'user',
+                    holder_id: (string) ($order->user_id ?? 1),
+                    ttl_seconds: 360,
+                    order_id: $order->id
+                );
+
+                if (!$reservationResult['success']) {
+                    Log::warning("Seat reservation failed in handleOrderFirstPayment", [
+                        'order_id' => $order->id,
+                        'screening_id' => $screening->id,
+                        'seat_ids' => $seatIds,
+                        'failed' => $reservationResult['failed'],
+                    ]);
+
+                    throw new \Exception(
+                        'Seat reservation failed: ' . json_encode($reservationResult['failed'])
+                    );
+                }
+
+                // PASO 4: Para terminal (smart), cancelar último payment_provider_ticket activo
                 if ($paymentMethod === 'terminal') {
                     $lastActivePayment = PaymentProviderTicket::where('order_id', $order->id)
                         ->whereIn('status', ['processing', 'pending', 'queued'])
@@ -350,7 +390,7 @@ class PaymentController extends Controller
                     }
                 }
 
-                // PASO 4: Preparar additional_data con idempotency_key e info de pago
+                // PASO 5: Preparar additional_data con idempotency_key e info de pago
                 $additionalData['total_price'] = $totalPrice;
                 $additionalData['seat_count'] = count($seatIds);
                 $additionalData['seat_ids'] = $seatIds;
@@ -360,7 +400,7 @@ class PaymentController extends Controller
                     $additionalData['idempotency_key'] = $idempotencyKey;
                 }
 
-                // PASO 5: Iniciar pago
+                // PASO 6: Iniciar pago
                 Log::info("Iniciando pago con PaymentProviderManager", [
                     'order_id' => $order->id,
                     'payment_provider_id' => $validated['payment_provider_id'],

@@ -242,8 +242,8 @@ class OrderFinalizationService
 
                 DB::commit();
 
-                // Step 7: Clean up provisioned reservations (outside transaction, best effort)
-                $this->deleteReservationsAfterFinalization($order);
+                // Step 7: Normalize any leftover reservations (outside transaction, best effort)
+                $this->normalizeReservationsAfterFinalization($order);
 
                 return [
                     'success' => true,
@@ -319,7 +319,7 @@ class OrderFinalizationService
                     ->where('seat_id', $ticket->seat_id)
                     ->first();
 
-                if (!$screeningSeat || $screeningSeat->status !== 'sold') {
+                if (!$screeningSeat || $screeningSeat->status !== ScreeningSeat::STATUS_SOLD) {
                     $fully_finalized = false;
                     $partial = true;
                     $issues[] = "Seat {$ticket->seat_id} not marked as sold";
@@ -335,9 +335,9 @@ class OrderFinalizationService
 
         // Check order status
         if ($order->status !== PaymentStatus::STATUS_COMPLETED) {
-            if (!$fully_finalized) {
-                $partial = true;
-            }
+            $fully_finalized = false;
+            $partial = true;
+            $issues[] = "Order {$order->id} status is {$order->status}, not " . PaymentStatus::STATUS_COMPLETED;
         }
 
         return [
@@ -403,10 +403,10 @@ class OrderFinalizationService
                         ->lockForUpdate()
                         ->first();
 
-                    if ($screeningSeat && $screeningSeat->status !== 'sold') {
-                        if ($screeningSeat->status === 'reserved' && $screeningSeat->order_id === $order->id) {
+                    if ($screeningSeat && $screeningSeat->status !== ScreeningSeat::STATUS_SOLD) {
+                        if ($screeningSeat->status === ScreeningSeat::STATUS_RESERVED && $screeningSeat->order_id === $order->id) {
                             $screeningSeat->update([
-                                'status' => 'sold',
+                                'status' => ScreeningSeat::STATUS_SOLD,
                                 'sold_at' => now(),
                             ]);
                             $repairs[] = "Marked seat {$ticket->seat_id} as sold";
@@ -561,7 +561,7 @@ class OrderFinalizationService
             }
 
             // Validation 1: If already SOLD by different order, error
-            if ($screeningSeat->status === 'sold' && $screeningSeat->order_id !== $orderId) {
+            if ($screeningSeat->status === ScreeningSeat::STATUS_SOLD && $screeningSeat->order_id !== $orderId) {
                 Log::error("Seat ownership conflict: already sold to different order", [
                     'screening_id' => $screeningId,
                     'seat_id' => $seatId,
@@ -575,7 +575,7 @@ class OrderFinalizationService
             }
 
             // Validation 2: If RESERVED by different order, error
-            if ($screeningSeat->status === 'reserved' && $screeningSeat->order_id !== $orderId) {
+            if ($screeningSeat->status === ScreeningSeat::STATUS_RESERVED && $screeningSeat->order_id !== $orderId) {
                 Log::error("Seat ownership conflict: reserved by different order", [
                     'screening_id' => $screeningId,
                     'seat_id' => $seatId,
@@ -589,7 +589,7 @@ class OrderFinalizationService
             }
 
             // Validation 3: If already sold by SAME order, skip (idempotent)
-            if ($screeningSeat->status === 'sold' && $screeningSeat->order_id === $orderId) {
+            if ($screeningSeat->status === ScreeningSeat::STATUS_SOLD && $screeningSeat->order_id === $orderId) {
                 Log::debug("Seat already sold by this order, skipping", [
                     'screening_id' => $screeningId,
                     'seat_id' => $seatId,
@@ -600,7 +600,7 @@ class OrderFinalizationService
 
             // Update: Mark as sold
             $screeningSeat->update([
-                'status' => 'sold',
+                'status' => ScreeningSeat::STATUS_SOLD,
                 'order_id' => $orderId,
                 'sold_at' => now(),
             ]);
@@ -646,7 +646,7 @@ class OrderFinalizationService
             // Get all reserved seats for this order (consistent with StartOrderPaymentAction)
             // Filter: order_id + status='reserved' + reserved_until not expired
             $reservedSeats = ScreeningSeat::where('order_id', $order->id)
-                ->where('status', 'reserved')
+                ->where('status', ScreeningSeat::STATUS_RESERVED)
                 ->where(function ($query) {
                     // Include seats with valid reservation (reserved_until >= now())
                     $query->whereNull('reserved_until')  // No TTL = never expires
@@ -690,12 +690,17 @@ class OrderFinalizationService
                     'customer_phone' => $order->customer_phone,
                     'ip_address' => $order->ip_address ?? null,
                     'payment_method' => null,  // Will be set during finalization
+                    'ticket_number' => 'TEMP',  // Temporary value, will be updated after creation
                 ]);
+
+                $ticket->ticket_number = sprintf("%s-%06d", now()->year, $ticket->id);
+                $ticket->save();
 
                 Log::info("Ticket created from reservation", [
                     'ticket_id' => $ticket->id,
                     'order_id' => $order->id,
                     'seat_id' => $screeningSeat->seat_id,
+                    'ticket_number' => $ticket->ticket_number,
                     'sequence' => $sequence,
                 ]);
 
@@ -725,39 +730,37 @@ class OrderFinalizationService
     }
 
     /**
-     * Delete reservations after tickets are created/finalized
+     * Normalize reservations after tickets are finalized
      * 
-     * Called after successful ticket finalization to clean up screening_seats
-     * entries that are no longer needed (transition from provisional to finalized state)
+     * Called after successful finalization to ensure inventory state consistency.
+     * Any leftover reserved rows for this order are transitioned to SOLD.
      * 
-     * After finalization, reserved seats should have already been transitioned to 'sold'
-     * by markSeatAsSold(). Any remaining 'reserved' entries are artifacts that can safely be deleted.
-     * 
-     * Note: We don't filter by reserved_until here because:
-     * - This is a post-finalization cleanup operation
-     * - Reserved seats should already be 'sold' at this point
-     * - Any 'reserved' entries here are orphaned artifacts
+     * We do NOT delete rows: screening_seats is now source of truth for availability.
      * 
      * @param Order $order
      * @return void
      */
-    private function deleteReservationsAfterFinalization(Order $order): void
+    private function normalizeReservationsAfterFinalization(Order $order): void
     {
         try {
-            // Delete all remaining 'reserved' seats (should be artifacts/orphans)
-            // Consistent with StartOrderPaymentAction that creates them
-            $deleted = ScreeningSeat::where('order_id', $order->id)
-                ->where('status', 'reserved')
-                ->delete();
+            $updated = ScreeningSeat::where('order_id', $order->id)
+                ->where('status', ScreeningSeat::STATUS_RESERVED)
+                ->update([
+                    'status' => ScreeningSeat::STATUS_SOLD,
+                    'sold_at' => now(),
+                    'reserved_until' => null,
+                    'reserved_by_type' => null,
+                    'reserved_by_id' => null,
+                ]);
 
-            if ($deleted > 0) {
-                Log::info("Deleted provisional reservations after finalization", [
+            if ($updated > 0) {
+                Log::warning("Normalized leftover reserved seats to sold after finalization", [
                     'order_id' => $order->id,
-                    'deleted_count' => $deleted,
+                    'updated_count' => $updated,
                 ]);
             }
         } catch (\Exception $e) {
-            Log::warning("Could not delete provisional reservations", [
+            Log::warning("Could not normalize provisional reservations", [
                 'order_id' => $order->id,
                 'error' => $e->getMessage(),
             ]);
@@ -765,4 +768,3 @@ class OrderFinalizationService
         }
     }
 }
-

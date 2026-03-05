@@ -6,10 +6,8 @@ use App\Http\Controllers\Controller;
 use App\Models\Ticket;
 use App\Models\TicketDetail;
 use App\Models\Screening;
-use App\Models\Seat;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
-use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
 
 class TicketController extends Controller
@@ -31,115 +29,6 @@ class TicketController extends Controller
             ->paginate(10);
 
         return response()->json($tickets);
-    }
-
-    /**
-     * Create a new ticket (purchase) con múltiples asientos
-     */
-    public function store(Request $request): JsonResponse
-    {
-        $user = auth()->user();
-        
-        if (!$user) {
-            return response()->json(['message' => 'Unauthorized'], 401);
-        }
-
-        $validated = $request->validate([
-            'screening_id' => 'required|exists:screenings,id',
-            'seat_ids' => 'required|array|min:1',
-            'seat_ids.*' => 'required|integer|exists:seats,id',
-            'payment_method' => 'nullable|string',
-        ]);
-
-        try {
-            return DB::transaction(function () use ($validated, $user, $request) {
-                $screening = Screening::with('movie', 'room.cinema')->findOrFail($validated['screening_id']);
-                $seatIds = $validated['seat_ids'];
-
-                // Verificar disponibilidad de asientos
-                $occupiedDetails = TicketDetail::where('screening_id', $screening->id)
-                    ->whereIn('seat_id', $seatIds)
-                    ->whereIn('status', ['confirmed', 'used'])
-                    ->count();
-
-                if ($occupiedDetails > 0) {
-                    return response()->json(
-                        ['message' => 'Uno o más asientos ya están reservados'],
-                        422
-                    );
-                }
-
-                // Obtener info de asientos
-                $seats = Seat::whereIn('id', $seatIds)->get();
-                $totalPrice = 0;
-                $seatDetails = [];
-
-                foreach ($seats as $seat) {
-                    $seatPrice = $screening->price * (1 + $seat->price_modifier);
-                    $totalPrice += $seatPrice;
-                    $seatDetails[$seat->id] = [
-                        'seat' => $seat,
-                        'price' => $seatPrice,
-                    ];
-                }
-
-                // Crear ticket (transacción de compra)
-                $ticket = Ticket::create([
-                    'screening_id' => $screening->id,
-                    'user_id' => $user->id,
-                    'ticket_number' => $this->generateTicketNumber(),
-                    'price' => $totalPrice,
-                    'status' => 'pending_payment',
-                    'payment_method' => $validated['payment_method'] ?? null,
-                    // Datos desnormalizados
-                    'customer_name' => $user->name,
-                    'customer_email' => $user->email,
-                    'customer_phone' => $user->phone ?? null,
-                    'movie_title' => $screening->movie->title,
-                    'room_name' => $screening->room->name,
-                    'cinema_name' => $screening->room->cinema->name,
-                    'screening_start_time' => $screening->start_time,
-                    'screening_format' => $screening->format,
-                    'purchased_at' => now(),
-                ]);
-
-                // Crear ticket_details para cada asiento
-                $details = [];
-                foreach ($seatIds as $seatId) {
-                    $seatData = $seatDetails[$seatId];
-                    $details[] = [
-                        'ticket_id' => $ticket->id,
-                        'screening_id' => $screening->id,
-                        'seat_id' => $seatId,
-                        'seat_code' => $seatData['seat']->seat_code,
-                        'row_number' => $seatData['seat']->row_number,
-                        'seat_number' => $seatData['seat']->seat_number,
-                        'price' => $seatData['price'],
-                        'status' => 'confirmed',
-                        'qr_code' => $this->generateQRCode($ticket->ticket_number . '-' . $seatData['seat']->seat_code),
-                        'created_at' => now(),
-                        'updated_at' => now(),
-                    ];
-                }
-
-                TicketDetail::insert($details);
-
-                // Recargar para obtener relaciones
-                $ticket->load('details');
-
-                return response()->json([
-                    'message' => 'Entradas creadas exitosamente',
-                    'ticket' => $ticket,
-                    'total_seats' => count($seatIds),
-                    'total_price' => $totalPrice,
-                ], 201);
-            });
-        } catch (\Exception $e) {
-            return response()->json(
-                ['message' => 'Error creando entradas: ' . $e->getMessage()],
-                422
-            );
-        }
     }
 
     /**
@@ -381,24 +270,6 @@ class TicketController extends Controller
             'used' => count($details->get('used', [])),
             'by_status' => $details,
         ]);
-    }
-
-    /**
-     * Generate unique ticket number
-     */
-    private function generateTicketNumber(): string
-    {
-        return 'TKT-' . date('Ymd') . '-' . strtoupper(Str::random(8));
-    }
-
-    /**
-     * Generate QR code
-     */
-    private function generateQRCode(string $data): string
-    {
-        // En producción, usar una librería de QR como BaconQrCode
-        // Por ahora, retornar un hash
-        return hash('sha256', $data);
     }
 
     public function validateTicketForPayment($ticketId): JsonResponse

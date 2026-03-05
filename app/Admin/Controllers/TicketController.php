@@ -112,7 +112,7 @@ class TicketController extends AdminController
         });
 
         // Mostrar detalles de asientos - editable
-        $show->hasMany('details', 'Asientos Comprados', function ($relation) {
+        $show->relation('details', 'Asientos Comprados', function ($relation) {
             $relation->column('id', 'ID')->sortable();
             $relation->column('seat_code', 'Asiento');
             $relation->column('row_number', 'Fila');

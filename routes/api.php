@@ -102,9 +102,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::put('/screenings/{screening}', [ScreeningController::class, 'update']);
     Route::delete('/screenings/{screening}', [ScreeningController::class, 'destroy']);
 
-    // User tickets - Gestión completa centralizada en TicketController
+    // User tickets
     Route::get('/tickets', [TicketController::class, 'index']);
-    Route::post('/tickets', [TicketController::class, 'store']);
     Route::get('/tickets/{ticket}', [TicketController::class, 'show']);
     Route::put('/tickets/{ticket}', [TicketController::class, 'update']);
     Route::delete('/tickets/{ticket}', [TicketController::class, 'destroy']);

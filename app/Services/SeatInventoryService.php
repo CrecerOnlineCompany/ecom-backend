@@ -4,8 +4,6 @@ namespace App\Services;
 
 use App\Models\ScreeningSeat;
 use App\Models\Screening;
-use App\Models\Seat;
-use App\Models\Ticket;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
@@ -39,8 +37,8 @@ class SeatInventoryService
         $existing = 0;
 
         foreach ($seats as $seat) {
-            // Usar updateOrCreate para ser idempotente
-            $screening_seat = ScreeningSeat::updateOrCreate(
+            // Crear solo si no existe para no pisar estados sold/reserved.
+            $screening_seat = ScreeningSeat::firstOrCreate(
                 [
                     'screening_id' => $screening_id,
                     'seat_id' => $seat->id,

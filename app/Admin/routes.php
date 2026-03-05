@@ -30,10 +30,19 @@ Route::group([
 
     // Tickets (resource completo - CRUD)
     $router->resource('tickets', 'TicketController');
+
+    // Reservations (screening_seats reserved inventory)
+    $router->resource('reservations', 'ReservationController');
+
+    // Orders (general overview)
+    $router->resource('orders', 'OrderController');
     
     // Rutas personalizadas para editar details desde tickets
     $router->put('tickets/{ticket}/details/{detail}', 'TicketController@updateDetail')->name('tickets.details.update');
     $router->delete('tickets/{ticket}/details/{detail}', 'TicketController@cancelDetail')->name('tickets.details.cancel');
+    
+    // Ruta para anular un ticket
+    $router->post('tickets/{ticket}/cancel', 'TicketController@cancel')->name('tickets.cancel');
     
     // Ticket Details (anidado bajo Tickets)
     $router->resource('ticket-details', 'TicketDetailController');
