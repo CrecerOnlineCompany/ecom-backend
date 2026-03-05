@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\PaymentStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -107,6 +108,18 @@ class ScreeningSeat extends Model
     public function scopeExpiredReservations($query)
     {
         return $query->where('status', self::STATUS_RESERVED)
+            ->whereNotNull('reserved_until')
             ->where('reserved_until', '<', now());
+    }
+
+    public function scopeExpiredReservationsWithoutPayment($query)
+    {
+        return $query->expiredReservations()
+            ->where(function ($seatQuery) {
+                $seatQuery->whereNull('order_id')
+                    ->orWhereDoesntHave('order.paymentProviderTickets', function ($paymentQuery) {
+                        $paymentQuery->where('status', PaymentStatus::STATUS_COMPLETED);
+                    });
+            });
     }
 }

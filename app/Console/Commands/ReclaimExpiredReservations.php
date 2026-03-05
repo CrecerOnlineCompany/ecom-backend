@@ -25,7 +25,7 @@ class ReclaimExpiredReservations extends Command
         $screeningId = $screeningId !== null ? (int) $screeningId : null;
 
         if ($dryRun) {
-            $query = ScreeningSeat::expiredReservations();
+            $query = ScreeningSeat::expiredReservationsWithoutPayment();
             if ($screeningId !== null) {
                 $query->where('screening_id', $screeningId);
             }

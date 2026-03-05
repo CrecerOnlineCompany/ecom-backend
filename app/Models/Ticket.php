@@ -18,6 +18,7 @@ class Ticket extends Model
         'order_id',
         'seat_id',
         'ticket_number',
+        'ticket_sequence',
         'price',
         'status',
         'qr_code',
@@ -48,6 +49,7 @@ class Ticket extends Model
 
     protected $casts = [
         'price' => 'decimal:2',
+        'ticket_sequence' => 'integer',
         'original_price' => 'decimal:2',
         'discount_amount' => 'decimal:2',
         'used_at' => 'datetime',

@@ -9,6 +9,7 @@ use App\Enums\PaymentStatus;
 use App\Exceptions\InvalidSeatOwnershipException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Schema;
 
 /**
  * Order Finalization Service - REFACTORED
@@ -41,8 +42,7 @@ use Illuminate\Support\Facades\Log;
  */
 class OrderFinalizationService
 {
-    const QR_VERSION = '1.0';
-    const QR_HMAC_KEY_ENV = 'QR_SIGNATURE_KEY';
+    private ?bool $hasTicketSequenceColumn = null;
 
     /**
      * Finalize order after payment approval
@@ -66,10 +66,15 @@ class OrderFinalizationService
             $order = Order::lockForUpdate()->findOrFail($orderId);
 
             // Step 2: Load all tickets for this order
-            $tickets = Ticket::where('order_id', $orderId)
-                ->lockForUpdate()
-                ->orderBy('ticket_sequence', 'asc')  // Deterministic order
-                ->get();
+            $ticketsQuery = Ticket::where('order_id', $orderId)
+                ->lockForUpdate();
+
+            $ticketsQuery->orderBy(
+                $this->hasTicketSequenceColumn() ? 'ticket_sequence' : 'id',
+                'asc'
+            );
+
+            $tickets = $ticketsQuery->get();
 
             // MEJORADO: Si no hay tickets, crear desde reservas de asientos
             if ($tickets->isEmpty()) {
@@ -96,10 +101,15 @@ class OrderFinalizationService
                 ]);
 
                 // Reload tickets after creation
-                $tickets = Ticket::where('order_id', $orderId)
-                    ->lockForUpdate()
-                    ->orderBy('ticket_sequence', 'asc')
-                    ->get();
+                $ticketsQuery = Ticket::where('order_id', $orderId)
+                    ->lockForUpdate();
+
+                $ticketsQuery->orderBy(
+                    $this->hasTicketSequenceColumn() ? 'ticket_sequence' : 'id',
+                    'asc'
+                );
+
+                $tickets = $ticketsQuery->get();
             }
 
             Log::info("Order loaded for finalization", [
@@ -185,13 +195,11 @@ class OrderFinalizationService
                     $ticketNumber = $this->generateFinalTicketNumber($order, $ticket);
 
                     // Generate QR code (without PII)
-                    $qrCode = $this->generateQRCode($ticketNumber, $ticket);
+                    //$qrCode = $this->generateQRCode($ticketNumber, $ticket);
 
                     // Update ticket
                     $ticket->update([
                         'ticket_number' => $ticketNumber,
-                        'qr_code' => $qrCode,
-                        'status' => PaymentStatus::STATUS_COMPLETED,
                         'purchased_at' => now(),
                     ]);
 
@@ -220,6 +228,7 @@ class OrderFinalizationService
                 // Step 6: Update order status and payment_data
                 $orderUpdate = [
                     'status' => PaymentStatus::STATUS_COMPLETED,
+                    'paid_at' => now(),
                     'completed_at' => now(),
                 ];
 
@@ -438,24 +447,29 @@ class OrderFinalizationService
      */
     private function generateFinalTicketNumber(Order $order, Ticket $ticket): string
     {
-        // If ticket_sequence not set, calculate it
-        $sequence = $ticket->ticket_sequence;
+        if ($this->hasTicketSequenceColumn()) {
+            $sequence = $ticket->ticket_sequence;
 
-        if (is_null($sequence)) {
-            // Count confirmed tickets to assign sequence if missing
-            $sequence = $ticket->order()
-                ->pluck('ticket_sequence')
-                ->filter()
-                ->max() ?? 0;
+            if (is_null($sequence)) {
+                $sequence = Ticket::where('order_id', $ticket->order_id)
+                    ->whereNotNull('ticket_sequence')
+                    ->max('ticket_sequence') ?? 0;
+                $sequence++;
 
-            $sequence++;
+                $ticket->update(['ticket_sequence' => $sequence]);
+                Log::debug("Assigned ticket_sequence", [
+                    'ticket_id' => $ticket->id,
+                    'sequence' => $sequence,
+                ]);
+            }
+        } else {
+            $orderedTicketIds = Ticket::where('order_id', $ticket->order_id)
+                ->orderBy('id', 'asc')
+                ->pluck('id')
+                ->values();
 
-            // Save the sequence
-            $ticket->update(['ticket_sequence' => $sequence]);
-            Log::debug("Assigned ticket_sequence", [
-                'ticket_id' => $ticket->id,
-                'sequence' => $sequence,
-            ]);
+            $position = $orderedTicketIds->search($ticket->id);
+            $sequence = $position === false ? 1 : ($position + 1);
         }
 
         $orderNumber = $ticket->order->order_number ?? 'UNKNOWN';
@@ -464,63 +478,14 @@ class OrderFinalizationService
     }
 
     /**
-     * Generate QR code with proper capture and NO PII
-     * 
-     * Uses output buffering to capture QRcode::png() output
-     * Data encoded: ticket_id, ticket_number, signature (HMAC)
-     * Excludes: email, phone, customer name
+     * Generate lightweight QR token (no image generation)
+     *
+     * Intencionalmente no genera PNG ni usa librerías externas.
+     * Guarda un token compacto para validación backend.
      */
     private function generateQRCode(string $ticketNumber, Ticket $ticket): string
     {
-        try {
-            $qrData = $this->buildQRData($ticketNumber, $ticket);
-
-            // Capture output using ob_start
-            ob_start();
-            \QRcode::png($qrData, false, QR_ECLEVEL_H, 4, 2);
-            $qrImage = ob_get_clean();
-
-            if ($qrImage === false) {
-                throw new \Exception("Failed to capture QRcode output");
-            }
-
-            return base64_encode($qrImage);
-
-        } catch (\Exception $e) {
-            Log::warning("Failed to generate QR code", [
-                'ticket_id' => $ticket->id,
-                'error' => $e->getMessage(),
-            ]);
-
-            // Fallback: use signature-based code (queryable by backend)
-            return $this->generateQRCodeFallback($ticketNumber, $ticket);
-        }
-    }
-
-    /**
-     * Build QR data WITHOUT PII
-     * 
-     * Data: ticket_id, ticket_number, signature
-     * Signature: HMAC-SHA256 of ticket_id + ticket_number with app key
-     */
-    private function buildQRData(string $ticketNumber, Ticket $ticket): string
-    {
-        // Generate HMAC signature for verification
-        $signatureData = $ticket->id . "|" . $ticketNumber;
-        $signature = hash_hmac(
-            'sha256',
-            $signatureData,
-            env(self::QR_HMAC_KEY_ENV, config('app.key'))
-        );
-
-        return json_encode([
-            'ticket_id' => $ticket->id,
-            'ticket_number' => $ticketNumber,
-            'screening_id' => $ticket->screening_id,
-            'seat_id' => $ticket->seat_id,
-            'signature' => $signature,
-            'version' => self::QR_VERSION,
-        ]);
+        return $this->generateQRCodeFallback($ticketNumber, $ticket);
     }
 
     /**
@@ -682,7 +647,6 @@ class OrderFinalizationService
                     'seat_id' => $screeningSeat->seat_id,
                     'user_id' => $order->user_id,
                     'order_id' => $order->id,
-                    'ticket_sequence' => $sequence,
                     'status' => PaymentStatus::STATUS_PENDING,  // Will be confirmed in finalization
                     'price' => $order->total_amount / $reservedSeats->count(),
                     'customer_email' => $order->customer_email,
@@ -692,6 +656,10 @@ class OrderFinalizationService
                     'payment_method' => null,  // Will be set during finalization
                     'ticket_number' => 'TEMP',  // Temporary value, will be updated after creation
                 ]);
+
+                if ($this->hasTicketSequenceColumn()) {
+                    $ticket->update(['ticket_sequence' => $sequence]);
+                }
 
                 $ticket->ticket_number = sprintf("%s-%06d", now()->year, $ticket->id);
                 $ticket->save();
@@ -766,5 +734,16 @@ class OrderFinalizationService
             ]);
             // Don't throw - this is a cleanup operation
         }
+    }
+
+    private function hasTicketSequenceColumn(): bool
+    {
+        if ($this->hasTicketSequenceColumn !== null) {
+            return $this->hasTicketSequenceColumn;
+        }
+
+        $this->hasTicketSequenceColumn = Schema::hasColumn('tickets', 'ticket_sequence');
+
+        return $this->hasTicketSequenceColumn;
     }
 }

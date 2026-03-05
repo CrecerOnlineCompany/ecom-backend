@@ -26,15 +26,19 @@ class Order extends Model
         'status',
         'purchase_device',
         'ip_address',
+        'payment_data',
         'reserved_until',
         'paid_at',
+        'completed_at',
         'cancelled_at',
     ];
 
     protected $casts = [
         'total_amount' => 'decimal:2',
+        'payment_data' => 'array',
         'reserved_until' => 'datetime',
         'paid_at' => 'datetime',
+        'completed_at' => 'datetime',
         'cancelled_at' => 'datetime',
     ];
 

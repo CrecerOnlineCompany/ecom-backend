@@ -2,12 +2,14 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Enums\PaymentStatus;
 use App\Http\Controllers\Controller;
 use App\Models\Screening;
 use App\Models\ScreeningSeat;
 use App\Models\Room;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Support\Facades\Log;
 
 class ScreeningController extends Controller
 {
@@ -103,15 +105,12 @@ class ScreeningController extends Controller
      */
     public function availableSeats(Screening $screening): JsonResponse
     {
+
         $blockedSeatIds = ScreeningSeat::where('screening_id', $screening->id)
             ->where(function ($query) {
                 $query->where('status', ScreeningSeat::STATUS_SOLD)
                     ->orWhere(function ($reservedQuery) {
-                        $reservedQuery->where('status', ScreeningSeat::STATUS_RESERVED)
-                            ->where(function ($ttlQuery) {
-                                $ttlQuery->whereNull('reserved_until')
-                                    ->orWhere('reserved_until', '>=', now());
-                            });
+                        $reservedQuery->where('status', ScreeningSeat::STATUS_RESERVED);
                     });
             })
             ->pluck('seat_id')

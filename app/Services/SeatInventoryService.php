@@ -275,7 +275,7 @@ class SeatInventoryService
      */
     public function reclaimExpiredReservations(?int $screening_id = null): int
     {
-        $query = ScreeningSeat::expiredReservations();
+        $query = ScreeningSeat::expiredReservationsWithoutPayment();
 
         if ($screening_id) {
             $query->where('screening_id', $screening_id);
