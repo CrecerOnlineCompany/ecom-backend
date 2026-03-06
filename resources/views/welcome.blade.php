@@ -5,9 +5,9 @@
     <link rel="icon" href="/favicon.ico">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>CINEA - Venta de Entradas</title>
-  <script type="module" crossorigin src="/assets/index-8366a96a.js"></script>
+  <script type="module" crossorigin src="/assets/index-21e73a0e.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/vendor-d71df2f6.js">
-  <link rel="stylesheet" href="/assets/index-4dab44fb.css">
+  <link rel="stylesheet" href="/assets/index-d0046585.css">
 </head>
 <body>
     <div id="app"></div>

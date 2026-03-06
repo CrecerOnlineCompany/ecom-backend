@@ -4,7 +4,6 @@ namespace App\Console;
 
 use App\Console\Commands\CheckMercadoPagoPending;
 use App\Console\Commands\ReclaimExpiredReservations;
-use App\Console\Commands\RegenerateOrderTickets;
 use Illuminate\Console\Scheduling\Schedule;
 use Illuminate\Foundation\Console\Kernel as ConsoleKernel;
 
@@ -17,7 +16,6 @@ class Kernel extends ConsoleKernel
     {
         $schedule->command('order:check-mercadopago-pending --update')->everyMinute();
         $schedule->command(ReclaimExpiredReservations::class)->everyMinute();
-        $schedule->command(RegenerateOrderTickets::class)->everyMinute();
     }
 
     /**

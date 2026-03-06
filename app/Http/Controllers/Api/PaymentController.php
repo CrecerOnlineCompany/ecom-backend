@@ -888,6 +888,139 @@ class PaymentController extends Controller
     }
 
     /**
+     * Cancelar una orden por order_number
+     * 
+     * Casos:
+     * - Si la orden tiene tickets confirmados: retorna 422 con la orden y sus tickets (no se puede cancelar)
+     * - Si no hay tickets ni pagos: libera asientos reservados y marca la orden como cancelled
+     */
+    public function cancelOrderByNumber(Request $request): JsonResponse
+    {
+        try {
+            $request->validate([
+                'order_number' => 'required|string',
+            ]);
+
+            $orderNumber = $request->input('order_number');
+
+            // Buscar la orden
+            $order = Order::where('order_number', $orderNumber)
+                ->with(['tickets', 'screening'])
+                ->firstOrFail();
+
+            Log::info("Order cancellation requested", [
+                'order_number' => $orderNumber,
+                'order_id' => $order->id,
+                'ticket_count' => $order->tickets()->count(),
+            ]);
+
+            // Verificar si tiene tickets confirmados
+            $confirmedTickets = $order->tickets()
+                ->where('status', Ticket::STATUS_COMPLETED)
+                ->get();
+
+            // CASO 1: Tiene tickets - NO se puede cancelar
+            if ($confirmedTickets->isNotEmpty()) {
+                Log::warning("Order cancellation rejected - has confirmed tickets", [
+                    'order_number' => $orderNumber,
+                    'confirmed_tickets_count' => $confirmedTickets->count(),
+                ]);
+
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No se puede cancelar una orden que tiene tickets confirmados',
+                    'error_code' => 'ORDER_HAS_TICKETS',
+                    'order' => [
+                        'id' => $order->id,
+                        'order_number' => $order->order_number,
+                        'status' => $order->status,
+                        'total_amount' => $order->total_amount,
+                        'currency' => $order->currency,
+                        'created_at' => $order->created_at,
+                        'tickets_count' => $confirmedTickets->count(),
+                        'tickets' => $confirmedTickets->map(fn($ticket) => [
+                            'id' => $ticket->id,
+                            'ticket_number' => $ticket->ticket_number,
+                            'seat_code' => $ticket->seat_code,
+                            'price' => $ticket->price,
+                            'status' => $ticket->status,
+                        ]),
+                    ],
+                ], 422);
+            }
+
+            // CASO 2: Sin tickets - Proceder con cancelación
+            DB::transaction(function () use ($order) {
+                // Liberar asientos reservados
+                $releasedSeats = $this->inventoryService->releaseSeatsByOrder(
+                    $order->id,
+                    'order_cancellation'
+                );
+
+                Log::info("Seats released for order cancellation", [
+                    'order_id' => $order->id,
+                    'released_count' => $releasedSeats,
+                ]);
+
+                // Marcar la orden como cancelled
+                $order->update([
+                    'status' => Order::STATUS_CANCELLED,
+                    'cancelled_at' => now(),
+                ]);
+
+                Log::info("Order cancelled successfully", [
+                    'order_number' => $order->order_number,
+                    'order_id' => $order->id,
+                    'released_seats' => $releasedSeats,
+                ]);
+            });
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Orden cancelada correctamente',
+                'order' => [
+                    'id' => $order->id,
+                    'order_number' => $order->order_number,
+                    'status' => $order->status,
+                    'total_amount' => $order->total_amount,
+                    'currency' => $order->currency,
+                    'cancelled_at' => $order->cancelled_at,
+                    'created_at' => $order->created_at,
+                ],
+            ]);
+
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            Log::warning("Order not found for cancellation", [
+                'order_number' => $request->input('order_number') ?? 'unknown',
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Orden no encontrada',
+                'error_code' => 'ORDER_NOT_FOUND',
+            ], 404);
+
+        } catch (\Illuminate\Validation\ValidationException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Validación fallida',
+                'errors' => $e->errors(),
+            ], 422);
+
+        } catch (\Exception $e) {
+            Log::error("Error in cancelOrderByNumber", [
+                'error' => $e->getMessage(),
+                'order_number' => $request->input('order_number') ?? 'unknown',
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Error al cancelar la orden: ' . $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
      * Confirmar pago QR (endpoint para escaneo)
      */
     public function confirmQrPayment(int $paymentTicketId, string $token): JsonResponse

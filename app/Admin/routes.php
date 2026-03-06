@@ -11,6 +11,7 @@ Route::group([
 ], function (Router $router) {
 
     $router->get('/', 'HomeController@index')->name('home');
+    $router->post('maintenance/regenerate-order-tickets', 'HomeController@regenerateOrderTickets')->name('maintenance.regenerate-order-tickets');
 
     // Cinemas
     $router->resource('cinemas', 'CinemaController');

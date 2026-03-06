@@ -3,6 +3,9 @@
 namespace App\Admin\Controllers;
 
 use App\Http\Controllers\Controller;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Artisan;
 use OpenAdmin\Admin\Admin;
 use OpenAdmin\Admin\Controllers\Dashboard;
 use OpenAdmin\Admin\Layout\Column;
@@ -31,6 +34,28 @@ class HomeController extends Controller
                 $row->column(4, function (Column $column) {
                     $column->append(Dashboard::dependencies());
                 });
-            });
+            })
+            ->row(view('admin.dashboard.maintenance'));
+    }
+
+    public function regenerateOrderTickets(Request $request): RedirectResponse
+    {
+        $exitCode = Artisan::call('orders:regenerate-tickets', [
+            '--force' => true,
+        ]);
+
+        $output = trim(Artisan::output());
+
+        if ($exitCode === 0) {
+            return redirect()
+                ->route('admin.home')
+                ->with('maintenance_success', 'Regeneración de tickets ejecutada correctamente.')
+                ->with('maintenance_output', $output);
+        }
+
+        return redirect()
+            ->route('admin.home')
+            ->with('maintenance_error', 'La regeneración finalizó con errores.')
+            ->with('maintenance_output', $output);
     }
 }

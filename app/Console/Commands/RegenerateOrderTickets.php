@@ -19,14 +19,15 @@ use Illuminate\Support\Facades\Log;
  */
 class RegenerateOrderTickets extends Command
 {
-    protected $signature = 'orders:regenerate-tickets {--order-id=} {--screening-id=} {--dry-run}';
+    protected $signature = 'orders:regenerate-tickets {--order-id=} {--screening-id=} {--dry-run} {--force : Ejecutar sin confirmación interactiva}';
     protected $description = 'Regenerar tickets para órdenes sin tickets pero con asientos reservados';
 
-    public function handle()
+    public function handle(): int
     {
         $dryRun = $this->option('dry-run');
         $orderId = $this->option('order-id');
         $screeningId = $this->option('screening-id');
+        $force = (bool) $this->option('force');
 
         if ($dryRun) {
             $this->warn('⚠️  DRY RUN - No se realizarán cambios');
@@ -55,7 +56,7 @@ class RegenerateOrderTickets extends Command
 
         if ($ordersToProcess->isEmpty()) {
             $this->info('✓ No hay órdenes que procesar');
-            return;
+            return self::SUCCESS;
         }
 
         $this->info("📦 Encontradas " . $ordersToProcess->count() . " órdenes para procesar\n");
@@ -73,9 +74,16 @@ class RegenerateOrderTickets extends Command
             })->toArray()
         );
 
-        if (!$this->confirm('¿Proceder con la regeneración de tickets?')) {
-            $this->info('Operación cancelada');
-            return;
+        if (!$force) {
+            if (!$this->input->isInteractive()) {
+                $this->error('Ejecución no interactiva detectada. Re-ejecuta con --force.');
+                return self::FAILURE;
+            }
+
+            if (!$this->confirm('¿Proceder con la regeneración de tickets?')) {
+                $this->info('Operación cancelada');
+                return self::SUCCESS;
+            }
         }
 
         $finalizationService = app(OrderFinalizationService::class);
@@ -143,5 +151,7 @@ class RegenerateOrderTickets extends Command
         if ($failed === 0 && !$dryRun) {
             $this->info("\n🎉 ¡Regeneración completada exitosamente!");
         }
+
+        return $failed > 0 ? self::FAILURE : self::SUCCESS;
     }
 }
