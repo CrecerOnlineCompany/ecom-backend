@@ -44,6 +44,20 @@ class Screening extends Model
         return $this->hasMany(Ticket::class);
     }
 
+    public function adminExcludedReservations(): HasMany
+    {
+        return $this->hasMany(ScreeningSeat::class)
+            ->where('reserved_by_type', 'admin_exclusion');
+    }
+
+    /**
+     * Campo virtual usado en OpenAdmin. No se persiste en DB.
+     */
+    public function setExcludedSeatIdsAttribute($value): void
+    {
+        // noop: evita "Unknown column excluded_seat_ids" en INSERT/UPDATE.
+    }
+
     public function cinema()
     {
         return $this->room->cinema();

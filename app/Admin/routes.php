@@ -24,6 +24,8 @@ Route::group([
 
     // Screenings
     $router->resource('screenings', 'ScreeningController');
+    $router->post('screenings/movie-rooms-options', 'ScreeningController@movieRoomsOptions')->name('screenings.movie-rooms.options');
+    $router->post('screenings/room-seats-options', 'ScreeningController@roomSeatsOptions')->name('screenings.room-seats.options');
     $router->get('screenings/export/excel', 'ScreeningController@exportExcel')->name('screenings.export.excel');
     $router->get('screenings/export/csv', 'ScreeningController@exportCsv')->name('screenings.export.csv');
     $router->get('screenings/import/form', 'ScreeningController@showImportForm')->name('screenings.import.form');
