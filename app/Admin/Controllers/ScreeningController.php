@@ -62,6 +62,7 @@ class ScreeningController extends AdminController
 
         // Tools (botones de acción)
         $grid->tools(function ($tools) {
+            $tools->append('<a class="btn btn-sm btn-primary" href="' . route('admin.screenings.weekly-screenings.form') . '"><i class="fa fa-calendar"></i> Funciones Semanales</a>');
             $tools->append('<a class="btn btn-sm btn-success" href="' . route('admin.screenings.export.excel') . '" target="_blank"><i class="fa fa-download"></i> Excel</a>');
             $tools->append('<a class="btn btn-sm btn-info" href="' . route('admin.screenings.export.csv') . '" target="_blank"><i class="fa fa-download"></i> CSV</a>');
             $tools->append('<a class="btn btn-sm btn-warning" href="' . route('admin.screenings.import.form') . '"><i class="fa fa-upload"></i> Importar</a>');

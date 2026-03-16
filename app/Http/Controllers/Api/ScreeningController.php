@@ -19,43 +19,57 @@ class ScreeningController extends Controller
      */
     public function index(Request $request): JsonResponse
     {
-        $query = Screening::with(['movie', 'room.cinema']);
+        $query = Screening::query()
+            ->join('rooms', 'rooms.id', '=', 'screenings.room_id')
+            ->join('cinemas', 'cinemas.id', '=', 'rooms.cinema_id')
+            ->select([
+                'screenings.id',
+                'screenings.start_time',
+                'screenings.format',
+                'screenings.available_seats',
+                'rooms.cinema_id',
+                'cinemas.name as cinema_name',
+                'rooms.number as room_number',
+            ]);
 
         if ($request->has('movie_id')) {
-            $query->where('movie_id', $request->movie_id);
+            $query->where('screenings.movie_id', $request->movie_id);
         }
 
         if ($request->has('cinema_id')) {
-            $query->whereHas('room', function ($q) {
-                $q->where('cinema_id', request()->cinema_id);
-            });
+            $query->where('rooms.cinema_id', $request->cinema_id);
         }
 
         if ($request->has('date')) {
 
             $date = Carbon::parse($request->date);
 
-            $query->whereBetween('start_time', [
+            $query->whereBetween('screenings.start_time', [
                 $date->copy()->startOfDay(),
                 $date->copy()->endOfDay()
             ]);
 
             if ($date->isToday()) {
-                $query->where('start_time', '>=', now());
+                $query->where('screenings.start_time', '>=', now());
             }
         } else {
 
-            $query->where('start_time', '>=', now());
+            $query->where('screenings.start_time', '>=', now());
         }
 
         if ($request->has('is_active')) {
-            $query->where('is_active', $request->boolean('is_active'));
+            $query->where('screenings.is_active', $request->boolean('is_active'));
         } else {
-            $query->where('is_active', true);
+            $query->where('screenings.is_active', true);
         }
 
 
-        $screenings = $query->orderBy('start_time')->paginate(20);
+        $screenings = $query->orderBy('screenings.start_time')->paginate(20);
+        $screenings->getCollection()->transform(function ($screening) {
+            $screening->start_time = Carbon::parse($screening->start_time)->utc()->format('Y-m-d\TH:i:s\Z');
+            return $screening;
+        });
+
         return response()->json($screenings);
     }
 
@@ -86,8 +100,36 @@ class ScreeningController extends Controller
      */
     public function show(Screening $screening): JsonResponse
     {
-        $screening->load(['movie', 'room.cinema', 'tickets.seat']);
-        return response()->json($screening);
+        $screening = Screening::query()
+            ->select([
+                'id',
+                'movie_id',
+                'room_id',
+                'start_time',
+                'price',
+                'available_seats',
+                'format',
+            ])
+            ->with([
+                'movie:id,title',
+                'room:id,cinema_id,number',
+                'room.cinema:id,name',
+            ])
+            ->findOrFail($screening->id);
+
+        return response()->json([
+            'id' => $screening->id,
+            'movie_id' => $screening->movie_id,
+            'cinema_id' => $screening->room?->cinema_id,
+            'room_id' => $screening->room_id,
+            'start_time' => $screening->start_time?->copy()->utc()->format('Y-m-d\TH:i:s\Z'),
+            'price' => $screening->price,
+            'available_seats' => $screening->available_seats,
+            'format' => $screening->format,
+            'movie_title' => $screening->movie?->title,
+            'cinema_name' => $screening->room?->cinema?->name,
+            'room_number' => $screening->room?->number,
+        ]);
     }
 
     /**

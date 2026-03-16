@@ -69,8 +69,29 @@ class MovieController extends Controller
      */
     public function show(Movie $movie): JsonResponse
     {
-        $movie->load(['screenings.room.cinema']);
-        return response()->json($this->transformMovie($movie));
+        $movie = Movie::query()
+            ->select([
+                'id',
+                'title',
+                'poster_image',
+                'poster_url',
+                'genre',
+                'duration',
+                'director',
+                'description',
+            ])
+            ->findOrFail($movie->id);
+
+        return response()->json([
+            'title' => $movie->title,
+            'poster_image_url' => $movie->poster_image
+                ? url('/images/movies/' . $movie->poster_image)
+                : $movie->poster_url,
+            'genre' => $movie->genre,
+            'duration' => $movie->duration,
+            'director' => $movie->director,
+            'synopsis' => $movie->description,
+        ]);
     }
 
     /**
