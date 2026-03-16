@@ -2,7 +2,12 @@
 
 namespace App\Admin\Controllers;
 
+use App\Admin\Actions\Orders\SyncOrder;
+use App\Admin\Actions\Orders\SyncOrderWithPayment;
 use App\Models\Order;
+use Illuminate\Http\Request;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\Artisan;
 use OpenAdmin\Admin\Controllers\AdminController;
 use OpenAdmin\Admin\Form;
 use OpenAdmin\Admin\Grid;
@@ -30,8 +35,6 @@ class OrderController extends AdminController
         $grid->column('order_number', 'Nro Orden')->sortable();
         $grid->column('customer_name', 'Cliente')->sortable();
         $grid->column('customer_email', 'Email');
-        $grid->column('screening.movie.title', 'Película');
-        $grid->column('screening.room.cinema.name', 'Cine');
         $grid->column('total_amount', 'Total')->sortable()->display(function ($value) {
             return '$' . number_format($value, 2);
         });
@@ -71,6 +74,9 @@ class OrderController extends AdminController
         });
 
         $grid->actions(function ($actions) {
+            $actions->add(new SyncOrder());
+            $actions->add(new SyncOrderWithPayment());
+
             $actions->disableEdit();
             $actions->disableDelete();
         });
@@ -198,5 +204,38 @@ class OrderController extends AdminController
         $form->display('updated_at', __('admin.updated_at'));
 
         return $form;
+    }
+
+    public function sync(Order $order, Request $request): RedirectResponse
+    {
+        $forcedPayment = $request->boolean('forced_payment') || $request->boolean('force-payment');
+
+        $params = [
+            '--order-number' => $order->order_number,
+            '--force' => true,
+        ];
+
+        if ($forcedPayment) {
+            $params['--forced-payment'] = true;
+        }
+
+        $exitCode = Artisan::call('orders:regenerate-tickets', $params);
+
+        $output = trim(Artisan::output());
+
+        if ($exitCode !== 0) {
+            admin_error(
+                'Sincronizar orden',
+                "Falló la ejecución para la orden {$order->order_number}" . ($forcedPayment ? ' (con pago validado)' : '') . ". " . ($output ?: 'Sin salida del comando.')
+            );
+            return redirect()->route('admin.orders.index');
+        }
+
+        admin_success(
+            'Sincronizar orden',
+            "Comando ejecutado para {$order->order_number}" . ($forcedPayment ? ' (con pago validado)' : '') . ". " . ($output ?: 'Sin salida del comando.')
+        );
+
+        return redirect()->route('admin.orders.index');
     }
 }

@@ -16,6 +16,7 @@ class Kernel extends ConsoleKernel
     {
         $schedule->command('order:check-mercadopago-pending --update')->everyMinute();
         $schedule->command(ReclaimExpiredReservations::class)->everyMinute();
+        //$schedule->command('orders:regenerate-tickets')->everyMinute();
     }
 
     /**

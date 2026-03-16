@@ -28,6 +28,25 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
         return $this->terminalService;
     }
 
+    private function buildTerminalBusyResponse(?int $retryAfterSeconds = null, ?string $legacyErrorCode = null): array
+    {
+        $message = 'La terminal tiene otra orden en curso. Cancelala manualmente desde la terminal o elegí pagar con QR.';
+
+        if ($retryAfterSeconds) {
+            $minutes = max(1, (int) ceil($retryAfterSeconds / 60));
+            $message .= " Si no podés cancelarla, probá nuevamente en {$minutes} minuto(s).";
+        }
+
+        return [
+            'success' => false,
+            'error_code' => 'terminal_busy_manual_cancel_or_qr',
+            'legacy_error_code' => $legacyErrorCode,
+            'retryable' => true,
+            'message' => $message,
+            'retry_after_seconds' => $retryAfterSeconds,
+        ];
+    }
+
     /**
      * ORDER-FIRST: Procesar pago por Terminal Smart Mercado Pago Punto
      * Espera Order creada con asientos reservados en inventory
@@ -76,20 +95,10 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                         'retry_after' => $guardResult['retry_after_seconds'] ?? null,
                     ]);
 
-                    // Mejorar el mensaje si está en estado at_terminal
-                    $message = $guardResult['cancel_error'];
-                    if ($guardResult['retry_after_seconds'] ?? null) {
-                        $minutes = ceil($guardResult['retry_after_seconds'] / 60);
-                        $message = "La terminal tiene un pago pendiente que no se puede cancelar. Por favor intenta en {$minutes} minuto(s).";
-                    }
-
-                    return [
-                        'success' => false,
-                        'error_code' => 'terminal_blocked',
-                        'retryable' => true,
-                        'message' => $message,
-                        'retry_after_seconds' => $guardResult['retry_after_seconds'] ?? null,
-                    ];
+                    return $this->buildTerminalBusyResponse(
+                        $guardResult['retry_after_seconds'] ?? null,
+                        'terminal_blocked'
+                    );
                 }
             }
             // =========================================================================
@@ -296,24 +305,17 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                 ]);
 
                 if (!self::ENABLE_AUTO_CANCEL_QUEUED) {
-                    return [
-                        'success' => false,
-                        'error_code' => 'terminal_busy',
-                        'retryable' => true,
-                        'message' => 'La terminal tiene una orden en cola. Cancelala desde el Smart e intentá nuevamente.',
-                    ];
+                    return $this->buildTerminalBusyResponse(null, 'terminal_busy');
                 }
 
                 // Usar el servicio para auto-cancel en este punto también
                 $guardResult = $this->getTerminalService()->guardTerminalBeforePayment($terminalId);
 
                 if (!$guardResult['can_proceed']) {
-                    return [
-                        'success' => false,
-                        'error_code' => 'auto_cancel_failed',
-                        'retryable' => true,
-                        'message' => $guardResult['cancel_error'] ?? 'No se pudo cancelar la orden anterior',
-                    ];
+                    return $this->buildTerminalBusyResponse(
+                        $guardResult['retry_after_seconds'] ?? null,
+                        'auto_cancel_failed'
+                    );
                 }
 
                 // Reintentar con nueva X-Idempotency-Key
@@ -410,6 +412,10 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             // El webhook debe contener el order_id en transaction_id
             $orderId = $data['id'] ?? $data['data']['id'] ?? null;
             $status = $data['status'] ?? $data['data']['status'] ?? null;
+            $externalReference = $data['external_reference']
+                ?? $data['data']['external_reference']
+                ?? $data['order']['external_reference']
+                ?? null;
 
             if (!$orderId || !$status) {
                 Log::warning('MercadoPagoPoint: Webhook incompleto', [
@@ -428,10 +434,34 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             // Step 2: Buscar PaymentProviderTicket
             $paymentTicket = PaymentProviderTicket::findByTransactionOrId($orderId);
 
+            if (!$paymentTicket && !empty($externalReference)) {
+                // Método 1: JSON contains en response_data
+                $paymentTicket = PaymentProviderTicket::whereJsonContains('response_data->external_reference', $externalReference)->first();
+            }
+
+            if (!$paymentTicket && !empty($externalReference)) {
+                // Método 2: reference_number
+                $paymentTicket = PaymentProviderTicket::where('reference_number', $externalReference)->first();
+            }
+
+            if (!$paymentTicket && !empty($externalReference)) {
+                // Método 3: fallback por order_number en external_reference
+                $orderNumber = $this->extractOrderNumberFromExternalReference((string) $externalReference);
+                if (!empty($orderNumber)) {
+                    $paymentTicket = PaymentProviderTicket::whereHas('order', function ($query) use ($orderNumber) {
+                            $query->where('order_number', $orderNumber);
+                        })
+                        ->where('payment_provider_id', $this->provider->id)
+                        ->latest('id')
+                        ->first();
+                }
+            }
+
             if (!$paymentTicket) {
                 Log::warning('MercadoPagoPoint: PaymentProviderTicket no encontrado', [
                     'order_id' => $orderId,
                     'status' => $status,
+                    'external_reference' => $externalReference,
                 ]);
                 return true; // Procesar pero sin hacer nada
             }
@@ -446,7 +476,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             $mappedStatus = match($status) {
                 'approved' => 'approved',
                 'pending' => 'processing',
-                'payment_failure', 'declined', 'cancelled' => 'declined',
+                'payment_failure', 'declined', 'cancelled' => 'failed',
                 default => 'processing',
             };
 
@@ -487,6 +517,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                             [
                                 'webhook_received_at' => now()->toIso8601String(),
                                 'terminal_status' => $status,
+                                'external_reference' => $externalReference,
                             ]
                         ),
                     ]);
@@ -514,6 +545,19 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             ]);
             return false;
         }
+    }
+
+    /**
+     * Extrae order_number desde external_reference tipo:
+     * CINEA-ORDER-{order_number}-ATT-{payment_ticket_id}
+     */
+    private function extractOrderNumberFromExternalReference(string $externalReference): ?string
+    {
+        if (preg_match('/^CINEA-ORDER-(.+)-ATT-\d+$/', $externalReference, $matches)) {
+            return $matches[1] ?? null;
+        }
+
+        return null;
     }
 
     /**

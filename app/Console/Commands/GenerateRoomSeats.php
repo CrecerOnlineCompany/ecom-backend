@@ -209,7 +209,7 @@ class GenerateRoomSeats extends Command
                         'seat_number' => $col,
                         'seat_code' => $seatCode,
                         'type' => 'regular',
-                        'price_modifier' => 0,
+                        'price_modifier' => 1.0,
                         'is_active' => true,
                         'created_at' => now(),
                         'updated_at' => now(),

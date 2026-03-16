@@ -7,10 +7,15 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Support\Facades\Schema;
 
 class Ticket extends Model
 {
     use HasFactory;
+
+    private static ?bool $hasSeatCodeColumn = null;
+    private static ?bool $hasRowNumberColumn = null;
+    private static ?bool $hasSeatNumberColumn = null;
 
     protected $fillable = [
         'screening_id',
@@ -160,14 +165,30 @@ class Ticket extends Model
 
         // Información de asiento
         if ($this->seat) {
-            $this->seat_code = $this->seat->seat_code;
-            $this->row_number = $this->seat->row_number;
-            $this->seat_number = $this->seat->seat_number;
+            if (self::hasTicketColumn('seat_code')) {
+                $this->seat_code = $this->seat->seat_code;
+            }
+            if (self::hasTicketColumn('row_number')) {
+                $this->row_number = $this->seat->row_number;
+            }
+            if (self::hasTicketColumn('seat_number')) {
+                $this->seat_number = $this->seat->seat_number;
+            }
         }
 
         // Fecha de compra (si no está establecida, usar fecha actual)
         if (!$this->purchased_at) {
             $this->purchased_at = now();
         }
+    }
+
+    private static function hasTicketColumn(string $column): bool
+    {
+        return match ($column) {
+            'seat_code' => self::$hasSeatCodeColumn ??= Schema::hasColumn('tickets', 'seat_code'),
+            'row_number' => self::$hasRowNumberColumn ??= Schema::hasColumn('tickets', 'row_number'),
+            'seat_number' => self::$hasSeatNumberColumn ??= Schema::hasColumn('tickets', 'seat_number'),
+            default => Schema::hasColumn('tickets', $column),
+        };
     }
 }

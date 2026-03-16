@@ -92,19 +92,50 @@ class MercadoPagoTerminalService
             $cancelResult = $this->cancelOrderFromApi($activeOrder['order_id'], $activeOrder['idempotency_key'] ?? null);
 
             if (!$cancelResult['success']) {
-                // Verificar si el error es porque la orden ya está en 'at_terminal' o en otro estado no cancelable
+                // Verificar si el error es por estado no cancelable
                 $errorCode = $cancelResult['error_code'] ?? null;
                 
                 if ($errorCode === 'cannot_cancel_order') {
-                    // La orden no se puede cancelar (está en at_terminal, declined, approved, etc)
-                    // En este caso, no podemos proceder. El usuario debe esperar a que expire (10 min)
-                    $result['cancel_error'] = $cancelResult['error'];
+                    $errorBody = $cancelResult['error'] ?? '';
+                    $parsedStatus = null;
+                    $apiMessage = null;
+
+                    if (is_string($errorBody) && $errorBody !== '') {
+                        $decoded = json_decode($errorBody, true);
+                        if (is_array($decoded)) {
+                            $apiMessage = $decoded['errors'][0]['message'] ?? null;
+                            if (is_string($apiMessage) && preg_match("/status[^']*'([^']+)'/i", $apiMessage, $matches)) {
+                                $parsedStatus = strtolower($matches[1] ?? '');
+                            }
+                        }
+                    }
+
+                    // Caso controlado: MP indica 'processed', no es cancelable pero tampoco bloqueante.
+                    if ($parsedStatus === 'processed') {
+                        $result['cancel_error'] = null;
+                        $result['can_proceed'] = true;
+                        $result['non_blocking_cancel_error'] = 'cannot_cancel_order_processed';
+                        $result['non_blocking_order_status'] = $parsedStatus;
+
+                        Log::warning('MercadoPagoTerminal: Orden no cancelable pero flujo continúa', [
+                            'order_id' => $activeOrder['order_id'],
+                            'error_code' => $errorCode,
+                            'order_status' => $parsedStatus,
+                            'api_message' => $apiMessage,
+                        ]);
+
+                        return $result;
+                    }
+
+                    // Para otros estados no cancelables, mantener bloqueo.
+                    $result['cancel_error'] = $errorBody;
                     $result['can_proceed'] = false;
-                    $result['retry_after_seconds'] = 600; // 10 minutos (tiempo de expiración)
+                    $result['retry_after_seconds'] = 600; // 10 minutos (tiempo de expiración aproximado)
                     
-                    Log::warning('MercadoPagoTerminal: Orden en estado no cancelable (at_terminal?)', [
+                    Log::warning('MercadoPagoTerminal: Orden en estado no cancelable (bloqueante)', [
                         'order_id' => $activeOrder['order_id'],
-                        'error' => $cancelResult['error'],
+                        'order_status' => $parsedStatus,
+                        'error' => $errorBody,
                         'error_code' => $errorCode,
                     ]);
                     
@@ -383,6 +414,19 @@ class MercadoPagoTerminalService
                 }
             } catch (\Exception $e) {
                 // Si no es JSON válido, mantener null
+            }
+
+            // Idempotencia: si ya estaba cancelada, considerar éxito
+            if ($errorCode === 'order_already_canceled') {
+                Log::info('MercadoPagoTerminal: Orden ya cancelada en API (idempotente)', [
+                    'order_id' => $orderId,
+                    'status_code' => $statusCode,
+                ]);
+
+                return [
+                    'success' => true,
+                    'already_canceled' => true,
+                ];
             }
 
             return [

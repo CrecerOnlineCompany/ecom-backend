@@ -221,7 +221,21 @@ class PaymentProviderManager
     public function processWebhook(string $webhookHash, Request $request): bool
     {
         $provider = PaymentProvider::where('webhook_secret', $webhookHash)->firstOrFail();
-        
+
+        // Mercado Pago puede enviar webhooks `type=order` para flujos Terminal/QR.
+        // El handler base (mercado_pago redirect) solo procesa `payment`,
+        // por eso enrutamos `order` al handler QR que soporta consulta de estado por API.
+        if ($provider->name === 'mercado_pago') {
+            $type = strtolower((string) ($request->input('type') ?? $request->input('data.type') ?? ''));
+            if (str_starts_with($type, 'order') || $type === 'merchant_order') {
+                Log::info('PaymentProviderManager: Routing Mercado Pago order webhook to QR handler', [
+                    'type' => $type,
+                    'provider_id' => $provider->id,
+                ]);
+                return (new MercadoPagoQrHandler($provider))->handleWebhook($request);
+            }
+        }
+
         $handler = $this->getHandler($provider);
         return $handler->handleWebhook($request);
     }

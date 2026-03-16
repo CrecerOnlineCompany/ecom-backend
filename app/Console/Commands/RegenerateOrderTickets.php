@@ -19,14 +19,16 @@ use Illuminate\Support\Facades\Log;
  */
 class RegenerateOrderTickets extends Command
 {
-    protected $signature = 'orders:regenerate-tickets {--order-id=} {--screening-id=} {--dry-run} {--force : Ejecutar sin confirmación interactiva}';
+    protected $signature = 'orders:regenerate-tickets {--order-id=} {--order-number=} {--screening-id=} {--forced-payment : Requiere pago aprobado y monto validado} {--dry-run} {--force : Ejecutar sin confirmación interactiva}';
     protected $description = 'Regenerar tickets para órdenes sin tickets pero con asientos reservados';
 
     public function handle(): int
     {
         $dryRun = $this->option('dry-run');
         $orderId = $this->option('order-id');
+        $orderNumber = $this->option('order-number');
         $screeningId = $this->option('screening-id');
+        $forcedPayment = (bool) $this->option('forced-payment');
         $force = (bool) $this->option('force');
 
         if ($dryRun) {
@@ -47,6 +49,11 @@ class RegenerateOrderTickets extends Command
             $this->info("Filtrando por order_id: {$orderId}");
         }
 
+        if ($orderNumber) {
+            $query->where('order_number', $orderNumber);
+            $this->info("Filtrando por order_number: {$orderNumber}");
+        }
+
         if ($screeningId) {
             $query->where('screening_id', $screeningId);
             $this->info("Filtrando por screening_id: {$screeningId}");
@@ -57,6 +64,10 @@ class RegenerateOrderTickets extends Command
         if ($ordersToProcess->isEmpty()) {
             $this->info('✓ No hay órdenes que procesar');
             return self::SUCCESS;
+        }
+
+        if ($forcedPayment) {
+            $this->warn('🔐 forced-payment habilitado: solo se procesarán órdenes con pago aprobado y monto validado.');
         }
 
         $this->info("📦 Encontradas " . $ordersToProcess->count() . " órdenes para procesar\n");
@@ -96,6 +107,24 @@ class RegenerateOrderTickets extends Command
                 
                 $reservedCount = $order->screeningSeats->where('status', 'reserved')->count();
                 $this->line("  Asientos reservados: {$reservedCount}");
+
+                if ($forcedPayment) {
+                    $validation = $finalizationService->validateApprovedPaymentForOrder($order);
+                    if (!$validation['ok']) {
+                        $this->error("  ❌ Pago inválido: {$validation['reason']}");
+                        Log::warning('RegenerateOrderTickets: forced-payment validation failed', [
+                            'order_id' => $order->id,
+                            'order_number' => $order->order_number,
+                            'reason' => $validation['reason'],
+                        ]);
+                        $failed++;
+                        continue;
+                    }
+
+                    $this->info(
+                        "  ✓ Pago validado (payment_ticket_id={$validation['payment_ticket_id']}, amount={$validation['matched_amount']}, expected={$validation['expected_amount']})"
+                    );
+                }
 
                 if ($dryRun) {
                     $this->info("  [DRY RUN] Sería procesada");

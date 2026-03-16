@@ -5,6 +5,7 @@ namespace App\Services\PaymentProviders\Handlers;
 use App\Services\PaymentProviders\PaymentProviderHandler;
 use App\Models\PaymentProviderTicket;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use MercadoPago\Client\Preference\PreferenceClient;
 use MercadoPago\MercadoPagoConfig;
@@ -218,8 +219,9 @@ class MercadoPagoHandler extends PaymentProviderHandler
             }
 
             // Step 3: Extraer datos críticos
-            $externalId = $request->input('data.id');
-            $paymentStatus = $request->input('data.status');
+            $externalId = (string) ($request->input('data.id') ?? $request->input('id') ?? '');
+            $paymentStatus = $request->input('data.status') ?? $request->input('status');
+            $externalReference = $request->input('data.external_reference') ?? $request->input('external_reference');
             
             if (empty($externalId)) {
                 Log::warning('MercadoPago: Webhook sin payment ID', [
@@ -233,13 +235,25 @@ class MercadoPagoHandler extends PaymentProviderHandler
                 'status' => $paymentStatus,
             ]);
 
+            // Si faltan datos en webhook, consultar detalle del pago en MP API
+            $paymentDetails = $this->fetchPaymentDetails($externalId);
+            if (!empty($paymentDetails)) {
+                $paymentStatus = $paymentStatus ?? ($paymentDetails['status'] ?? null);
+                $externalReference = $externalReference ?? ($paymentDetails['external_reference'] ?? null);
+            }
+
             // Step 4: Buscar PaymentProviderTicket
             $paymentTicket = PaymentProviderTicket::findByTransactionOrId($externalId);
+
+            if (!$paymentTicket && !empty($externalReference)) {
+                $paymentTicket = $this->findByExternalReference((string) $externalReference);
+            }
             
             if (!$paymentTicket) {
                 Log::warning('MercadoPago: PaymentProviderTicket no encontrado', [
                     'external_id' => $externalId,
                     'status' => $paymentStatus,
+                    'external_reference' => $externalReference,
                 ]);
                 // Retornar true (webhook procesado) aunque no encontremos el ticket
                 // Podría ser de un intento anterior o de otro sistema
@@ -304,12 +318,17 @@ class MercadoPagoHandler extends PaymentProviderHandler
                     break;
 
                 case 'pending':
+                case 'in_process':
+                case 'authorized':
                     try {
                         $paymentTicket->update([
                             'status' => 'processing',
                             'response_data' => array_merge($paymentTicket->response_data ?? [], [
                                 'webhook_data' => $data,
                                 'pending_at' => now()->toIso8601String(),
+                                'external_reference' => $externalReference,
+                                'mp_payment_status' => $paymentStatus,
+                                'payment_details' => $paymentDetails,
                             ]),
                         ]);
 
@@ -327,6 +346,14 @@ class MercadoPagoHandler extends PaymentProviderHandler
                     break;
 
                 default:
+                    if (empty($paymentStatus)) {
+                        Log::warning('MercadoPago: No se pudo determinar status del pago', [
+                            'external_id' => $externalId,
+                            'external_reference' => $externalReference,
+                        ]);
+                        return true;
+                    }
+
                     Log::warning('MercadoPago: Status desconocido', [
                         'status' => $paymentStatus,
                         'external_id' => $externalId,
@@ -387,5 +414,58 @@ class MercadoPagoHandler extends PaymentProviderHandler
     {
         // Implementar validación real basada en firma de Mercado Pago
         // Usar secret del provider para validar
+    }
+
+    /**
+     * Buscar PaymentProviderTicket por external_reference (CINEA-...-ATT-{id}).
+     */
+    private function findByExternalReference(string $externalReference): ?PaymentProviderTicket
+    {
+        // Formato esperado: CINEA-ORDER-{order_number}-ATT-{payment_ticket_id}
+        if (preg_match('/ATT-(\d+)$/', $externalReference, $matches)) {
+            $ticketById = PaymentProviderTicket::find((int) $matches[1]);
+            if ($ticketById) {
+                return $ticketById;
+            }
+        }
+
+        $ticketByReference = PaymentProviderTicket::where('reference_number', $externalReference)->first();
+        if ($ticketByReference) {
+            return $ticketByReference;
+        }
+
+        return PaymentProviderTicket::whereJsonContains('response_data->external_reference', $externalReference)->first();
+    }
+
+    /**
+     * Obtener detalles del pago desde MP API para completar status/external_reference.
+     */
+    private function fetchPaymentDetails(string $externalId): array
+    {
+        try {
+            $accessToken = $this->provider->getConfig('access_token');
+            if (empty($accessToken)) {
+                return [];
+            }
+
+            $response = Http::withToken($accessToken)
+                ->get("https://api.mercadopago.com/v1/payments/{$externalId}");
+
+            if (!$response->successful()) {
+                Log::warning('MercadoPago: No se pudo consultar payment details', [
+                    'external_id' => $externalId,
+                    'status_code' => $response->status(),
+                ]);
+                return [];
+            }
+
+            return $response->json() ?? [];
+        } catch (\Exception $e) {
+            Log::warning('MercadoPago: Error consultando payment details', [
+                'external_id' => $externalId,
+                'error' => $e->getMessage(),
+            ]);
+            return [];
+        }
     }
 }

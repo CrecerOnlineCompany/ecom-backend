@@ -86,7 +86,7 @@ class PaymentProviderTicket extends Model
      */
     public function isApproved(): bool
     {
-        return $this->status === 'approved';
+        return in_array($this->status, ['approved', self::STATUS_COMPLETED], true);
     }
 
     /**
@@ -141,10 +141,11 @@ class PaymentProviderTicket extends Model
 
                 // Marcar payment como 'finalization_failed' para auditoría
                 $this->update([
-                    'status' => 'finalization_failed',
+                    'status' => self::STATUS_FAILED,
                     'response_data' => array_merge($this->response_data ?? [], [
                         'finalization_error' => $errorMsg,
                         'finalization_error_code' => $errorCode,
+                        'finalization_status' => 'failed',
                         'failed_at' => now()->toIso8601String(),
                     ]),
                     'completed_at' => now(),
@@ -165,7 +166,7 @@ class PaymentProviderTicket extends Model
 
             // Marcar payment como aprobado
             $this->update([
-                'status' => 'approved',
+                'status' => self::STATUS_COMPLETED,
                 'response_data' => array_merge($this->response_data ?? [], [
                     'finalization_status' => 'success',
                     'finalized_at' => now()->toIso8601String(),
@@ -182,14 +183,14 @@ class PaymentProviderTicket extends Model
 
             // Solo marcar payment como aprobado, el ticket ya debería existir
             $this->update([
-                'status' => 'approved',
+                'status' => self::STATUS_COMPLETED,
                 'response_data' => array_merge($this->response_data ?? [], $responseData),
                 'completed_at' => now(),
             ]);
 
             // Si hay ticket vinculado, marcar como confirmed
             if ($this->ticket) {
-                $this->ticket->update(['status' => 'confirmed']);
+                $this->ticket->update(['status' => PaymentStatus::STATUS_COMPLETED]);
                 
                 \Log::info("Ticket marcado como confirmed (legacy)", [
                     'ticket_id' => $this->ticket->id,
@@ -205,7 +206,7 @@ class PaymentProviderTicket extends Model
     public function decline(array $responseData = []): void
     {
         $this->update([
-            'status' => 'declined',
+            'status' => self::STATUS_FAILED,
             'response_data' => array_merge($this->response_data ?? [], $responseData),
             'completed_at' => now(),
         ]);
@@ -229,7 +230,7 @@ class PaymentProviderTicket extends Model
     public function markQueued(array $responseData = []): void
     {
         $this->update([
-            'status' => 'queued',
+            'status' => self::STATUS_PROCESSING,
             'response_data' => array_merge($this->response_data ?? [], $responseData, [
                 'queued_at' => now()->toIso8601String(),
             ]),
@@ -350,7 +351,7 @@ class PaymentProviderTicket extends Model
 
     public function scopeApproved($query)
     {
-        return $query->where('status', 'approved');
+        return $query->whereIn('status', ['approved', self::STATUS_COMPLETED]);
     }
 
     public function scopePending($query)

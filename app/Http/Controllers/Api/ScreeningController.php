@@ -147,8 +147,20 @@ class ScreeningController extends Controller
         $availableSeats = $screening->room->seats()
             ->whereNotIn('id', $blockedSeatIds)
             ->where('is_active', true)
-            ->select('id', 'seat_code', 'type', 'row_number', 'seat_number')
+            ->select('id', 'seat_code', 'type', 'row_number', 'seat_number', 'price_modifier')
             ->get();
+
+        $basePrice = (float) $screening->price;
+        $availableSeats->transform(function ($seat) use ($basePrice) {
+            // Compatibilidad: algunos asientos históricos quedaron con modifier=0.
+            // En ese caso usamos precio base (modifier=1.0) para evitar price=0.
+            $modifier = (float) ($seat->price_modifier ?? 1);
+            if ($modifier <= 0) {
+                $modifier = 1.0;
+            }
+            $seat->price = round($basePrice * $modifier, 2);
+            return $seat;
+        });
 
         return response()->json([
             'screening_id' => $screening->id,

@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Order;
+use App\Models\PaymentProviderTicket;
 use App\Models\Ticket;
 use App\Models\TicketDetail;
 use App\Models\ScreeningSeat;
@@ -44,6 +45,60 @@ use Illuminate\Support\Facades\Schema;
 class OrderFinalizationService
 {
     private ?bool $hasTicketSequenceColumn = null;
+
+    /**
+     * Valida que la orden tenga pago aprobado y monto compatible con el total esperado.
+     * Reutilizable desde comandos, acciones y controladores.
+     */
+    public function validateApprovedPaymentForOrder(Order $order): array
+    {
+        $expectedAmount = $this->getExpectedOrderAmountForValidation($order);
+
+        $payments = $order->paymentProviderTickets()
+            ->latest('id')
+            ->get();
+
+        if ($payments->isEmpty()) {
+            return ['ok' => false, 'reason' => 'No tiene pagos asociados.'];
+        }
+
+        foreach ($payments as $payment) {
+            $statusCandidates = $this->extractStatusCandidatesForValidation($payment);
+            $approved = false;
+
+            foreach ($statusCandidates as $candidate) {
+                if ($this->mapProviderStatusForValidation($candidate) === PaymentStatus::STATUS_COMPLETED) {
+                    $approved = true;
+                    break;
+                }
+            }
+
+            if (!$approved) {
+                continue;
+            }
+
+            $matchedAmount = $this->extractPaidAmountForValidation($payment);
+            if ($matchedAmount === null) {
+                continue;
+            }
+
+            if (abs($matchedAmount - $expectedAmount) > 0.01) {
+                continue;
+            }
+
+            return [
+                'ok' => true,
+                'payment_ticket_id' => $payment->id,
+                'matched_amount' => number_format($matchedAmount, 2, '.', ''),
+                'expected_amount' => number_format($expectedAmount, 2, '.', ''),
+            ];
+        }
+
+        return [
+            'ok' => false,
+            'reason' => "No se encontró pago aprobado con monto igual al total esperado ({$expectedAmount}).",
+        ];
+    }
 
     /**
      * Finalize order after payment approval
@@ -318,12 +373,6 @@ class OrderFinalizationService
                 $fully_finalized = false;
                 $partial = true;
                 $issues[] = "Ticket {$ticket->id} has NULL ticket_number";
-            }
-
-            if (is_null($ticket->qr_code)) {
-                $fully_finalized = false;
-                $partial = true;
-                $issues[] = "Ticket {$ticket->id} has NULL qr_code";
             }
 
             // Check if corresponding seat is sold
@@ -616,11 +665,6 @@ class OrderFinalizationService
             // Filter: order_id + status='reserved' + reserved_until not expired
             $reservedSeats = ScreeningSeat::where('order_id', $order->id)
                 ->where('status', ScreeningSeat::STATUS_RESERVED)
-                ->where(function ($query) {
-                    // Include seats with valid reservation (reserved_until >= now())
-                    $query->whereNull('reserved_until')  // No TTL = never expires
-                        ->orWhere('reserved_until', '>=', now());
-                })
                 ->lockForUpdate()
                 ->get();
 
@@ -756,6 +800,152 @@ class OrderFinalizationService
         $this->hasTicketSequenceColumn = Schema::hasColumn('tickets', 'ticket_sequence');
 
         return $this->hasTicketSequenceColumn;
+    }
+
+    /**
+     * Total esperado para validación de pago:
+     * suma de tickets si existen, sino total_amount de orden.
+     */
+    private function getExpectedOrderAmountForValidation(Order $order): float
+    {
+        $ticketTotal = (float) $order->tickets()->sum('price');
+        if ($ticketTotal > 0) {
+            return $ticketTotal;
+        }
+
+        return (float) $order->total_amount;
+    }
+
+    /**
+     * Candidatos de estado provenientes del registro de pago.
+     */
+    private function extractStatusCandidatesForValidation(PaymentProviderTicket $payment): array
+    {
+        $responseData = $this->asArrayForValidation($payment->response_data);
+
+        return array_values(array_filter([
+            $payment->status,
+            data_get($responseData, 'webhook_status'),
+            data_get($responseData, 'status'),
+            data_get($responseData, 'terminal_status'),
+            data_get($responseData, 'mp_payment_status'),
+            data_get($responseData, 'payment_details.status'),
+            data_get($responseData, 'webhook_data.status'),
+            data_get($responseData, 'webhook_data.data.status'),
+        ], fn ($value) => !is_null($value) && $value !== ''));
+    }
+
+    /**
+     * Mapea estados del provider al estado unificado.
+     */
+    private function mapProviderStatusForValidation(?string $status): string
+    {
+        $raw = strtolower(trim((string) $status));
+
+        if (in_array($raw, ['approved', 'completed', 'processed'], true)) {
+            return PaymentStatus::STATUS_COMPLETED;
+        }
+
+        if (in_array($raw, ['pending', 'processing', 'queued', 'created', 'at_terminal', 'authorized', 'in_process'], true)) {
+            return PaymentStatus::STATUS_PROCESSING;
+        }
+
+        if (in_array($raw, ['declined', 'rejected', 'failed', 'finalization_failed'], true)) {
+            return PaymentStatus::STATUS_FAILED;
+        }
+
+        if (in_array($raw, ['cancelled', 'canceled'], true)) {
+            return PaymentStatus::STATUS_CANCELLED;
+        }
+
+        if ($raw === 'expired') {
+            return PaymentStatus::STATUS_EXPIRED;
+        }
+
+        if ($raw === 'refunded') {
+            return PaymentStatus::STATUS_REFUNDED;
+        }
+
+        return $raw;
+    }
+
+    /**
+     * Extrae monto pagado desde distintas estructuras de response_data/webhook.
+     */
+    private function extractPaidAmountForValidation(PaymentProviderTicket $payment): ?float
+    {
+        $responseData = $this->asArrayForValidation($payment->response_data);
+
+        $candidates = [
+            data_get($responseData, 'amount'),
+            data_get($responseData, 'total_amount'),
+            data_get($responseData, 'amount_paid'),
+            data_get($responseData, 'paid_amount'),
+            data_get($responseData, 'transaction_amount'),
+            data_get($responseData, 'transaction_details.total_paid_amount'),
+            data_get($responseData, 'payment_details.transaction_amount'),
+            data_get($responseData, 'payment_details.transaction_details.total_paid_amount'),
+            data_get($responseData, 'webhook_data.transaction_amount'),
+            data_get($responseData, 'webhook_data.transaction_details.total_paid_amount'),
+            data_get($responseData, 'webhook_data.amount'),
+            data_get($responseData, 'webhook_data.data.amount'),
+            data_get($responseData, 'payload.transactions.payments.0.amount'),
+        ];
+
+        foreach ($candidates as $amount) {
+            $parsed = $this->parseAmountForValidation($amount);
+            if ($parsed !== null) {
+                return $parsed;
+            }
+        }
+
+        return null;
+    }
+
+    private function parseAmountForValidation($value): ?float
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        if (is_int($value) || is_float($value)) {
+            return round((float) $value, 2);
+        }
+
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $normalized = preg_replace('/[^0-9,.\-]/', '', $value);
+        if ($normalized === '' || $normalized === null) {
+            return null;
+        }
+
+        if (str_contains($normalized, ',') && str_contains($normalized, '.')) {
+            $normalized = str_replace(',', '', $normalized);
+        } else {
+            $normalized = str_replace(',', '.', $normalized);
+        }
+
+        if (!is_numeric($normalized)) {
+            return null;
+        }
+
+        return round((float) $normalized, 2);
+    }
+
+    private function asArrayForValidation($data): array
+    {
+        if (is_array($data)) {
+            return $data;
+        }
+
+        if (is_string($data)) {
+            $decoded = json_decode($data, true);
+            return is_array($decoded) ? $decoded : [];
+        }
+
+        return [];
     }
 
     /**

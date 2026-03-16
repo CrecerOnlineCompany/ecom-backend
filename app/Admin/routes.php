@@ -49,6 +49,7 @@ Route::group([
 
     // Orders (general overview)
     $router->resource('orders', 'OrderController');
+    $router->get('orders/{order}/sync', 'OrderController@sync')->name('orders.sync');
     
     // Rutas personalizadas para editar details desde tickets
     $router->put('tickets/{ticket}/details/{detail}', 'TicketController@updateDetail')->name('tickets.details.update');

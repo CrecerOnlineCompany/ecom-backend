@@ -9,7 +9,6 @@ use App\Models\PaymentProviderTicket;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Str;
 use MercadoPago\MercadoPagoConfig;
 use MercadoPago\Client\Preference\PreferenceClient;
 use MercadoPago\Client\Order\OrderClient;
@@ -45,7 +44,8 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                 throw new \Exception('Screening no encontrado en la orden');
             }
 
-            $mode = $additionalData['qr_mode'] ?? $this->provider->getConfig('qr_mode') ?? self::MODE_POS_STATIC_ORDER;
+            // Default a preference para mantener QR dinámico con monto predefinido.
+            $mode = $additionalData['qr_mode'] ?? $this->provider->getConfig('qr_mode') ?? self::MODE_PREFERENCE;
             
             Log::info('MercadoPagoQR (order-first): Iniciando procesamiento', [
                 'payment_ticket_id' => $paymentTicket->id,
@@ -90,7 +90,8 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             $accessToken = $this->provider->getConfig('access_token');
             MercadoPagoConfig::setAccessToken($accessToken);
 
-            $externalReference = 'CINEA-' . $paymentTicket->id . '-' . Str::random(8);
+            // Usar referencia estable con order_number para facilitar correlación en webhooks.
+            $externalReference = $paymentTicket->generateExternalReference('QR');
             
             $client = new PreferenceClient();
             
@@ -109,7 +110,7 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                     ]
                 ],
                 'external_reference' => $externalReference,
-                'notification_url' => route('api.webhook.payment', ['hash' => 'mercadopago']),
+                'notification_url' => route('api.webhook.payment', ['hash' => $this->provider->webhook_secret]),
                 'back_urls' => [
                     'success' => route('api.payment.success'),
                     'failure' => route('api.payment.failure'),
@@ -194,7 +195,8 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             
             MercadoPagoConfig::setAccessToken($accessToken);
 
-            $externalReference = 'CINEA-' . $paymentTicket->id . '-' . Str::random(8);
+            // Usar referencia estable con order_number para facilitar correlación en webhooks.
+            $externalReference = $paymentTicket->generateExternalReference('QR');
             
             $client = new OrderClient();
             
@@ -619,6 +621,33 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
                 'webhook_id' => $webhookId,
                 'external_reference' => $externalReference,
             ]);
+
+            // Método 3: Fallback por order_number extraído de external_reference
+            $orderNumber = $this->extractOrderNumberFromExternalReference($externalReference);
+            if (!empty($orderNumber)) {
+                $paymentTicket = PaymentProviderTicket::whereHas('order', function ($query) use ($orderNumber) {
+                        $query->where('order_number', $orderNumber);
+                    })
+                    ->where('payment_provider_id', $this->provider->id)
+                    ->latest('id')
+                    ->first();
+
+                if ($paymentTicket) {
+                    Log::info('MercadoPagoQR: ✓ Encontrado por order_number derivado de external_reference', [
+                        'webhook_id' => $webhookId,
+                        'payment_ticket_id' => $paymentTicket->id,
+                        'order_number' => $orderNumber,
+                        'method' => 'order_number_fallback',
+                    ]);
+                    return $paymentTicket;
+                }
+
+                Log::warning('MercadoPagoQR: No encontrado por order_number fallback', [
+                    'webhook_id' => $webhookId,
+                    'order_number' => $orderNumber,
+                    'external_reference' => $externalReference,
+                ]);
+            }
         }
         
         // Log final - ningún método funcionó
@@ -630,6 +659,23 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             'all_payment_tickets_sample' => PaymentProviderTicket::limit(5)->get(['id', 'transaction_id', 'status', 'payment_provider_id'])->toArray(),
         ]);
         
+        return null;
+    }
+
+    /**
+     * Extrae order_number desde external_reference tipo:
+     * CINEA-ORDER-{order_number}-ATT-{payment_ticket_id}
+     */
+    private function extractOrderNumberFromExternalReference(?string $externalReference): ?string
+    {
+        if (empty($externalReference)) {
+            return null;
+        }
+
+        if (preg_match('/^CINEA-ORDER-(.+)-ATT-\d+$/', $externalReference, $matches)) {
+            return $matches[1] ?? null;
+        }
+
         return null;
     }
 
@@ -804,11 +850,11 @@ class MercadoPagoQrHandler extends PaymentProviderHandler
             'original_status' => $status,
         ]);
         
-        if ($status === 'approved') {
+        if (in_array($status, ['approved', 'processed'], true)) {
             Log::debug('MercadoPagoQR: Status mapeado a APPROVED');
             return 'approved';
         }
-        if ($status === 'pending') {
+        if (in_array($status, ['pending', 'created', 'at_terminal'], true)) {
             Log::debug('MercadoPagoQR: Status mapeado a PENDING');
             return 'pending';
         }

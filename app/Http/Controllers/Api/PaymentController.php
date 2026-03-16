@@ -158,11 +158,14 @@ class PaymentController extends Controller
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'required|exists:seats,id',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
+                'order_number' => 'nullable|string|max:50',
+                'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'nullable|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
+                'additional_data.order_number' => 'nullable|string|max:50',
                 'additional_data.payment_method' => 'nullable|string|in:redirect,qr,terminal',
             ]);
 
@@ -196,11 +199,14 @@ class PaymentController extends Controller
                 'screening_id' => 'required|exists:screenings,id',
                 'seat_id' => 'required|exists:seats,id',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
+                'order_number' => 'nullable|string|max:50',
+                'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'required|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
+                'additional_data.order_number' => 'nullable|string|max:50',
                 'additional_data.payment_method' => 'nullable|string|in:redirect,qr,terminal',
             ]);
 
@@ -247,61 +253,115 @@ class PaymentController extends Controller
                 $screening = Screening::findOrFail($validated['screening_id']);
                 $seatIds = $isBatch ? $validated['seat_ids'] : [$validated['seat_id']];
                 $additionalData = $validated['additional_data'] ?? [];
-                $idempotencyKey = $additionalData['idempotency_key'] ?? null;
+                $idempotencyKey = $validated['idempotency_key'] ?? ($additionalData['idempotency_key'] ?? null);
+                $requestedOrderNumber = $validated['order_number'] ?? ($additionalData['order_number'] ?? null);
                 $customerEmail = $validated['customer_email'];
+                $currentUserId = auth()->id();
                 
                 Log::info("handleOrderFirstPayment: Iniciando flujo order-first", [
+                    'requested_order_number' => $requestedOrderNumber,
                     'idempotency_key' => $idempotencyKey,
                     'payload_method' => $paymentMethod,
                     'seat_count' => count($seatIds),
                     'customer_email' => $customerEmail,
                 ]);
 
-                // PASO 1: Buscar orden activa por idempotency_key
+                // PASO 1: Reusar orden solo si llega order_number + idempotency_key
                 $activeOrder = null;
-                if ($idempotencyKey) {
-                    $activeOrder = Order::where('customer_email', $customerEmail)
-                        ->where('screening_id', $validated['screening_id'])
-                        ->whereIn('status', [
-                            Order::STATUS_DRAFT,
-                            Order::STATUS_RESERVED,
-                            Order::STATUS_PAYMENT_PROCESSING,
-                        ])
+                if (($requestedOrderNumber && !$idempotencyKey) || (!$requestedOrderNumber && $idempotencyKey)) {
+                    return [
+                        'success' => false,
+                        'message' => 'Para reutilizar orden se requieren order_number e idempotency_key',
+                        'error_code' => 'ORDER_REUSE_PARAMS_REQUIRED',
+                    ];
+                }
+
+                if ($requestedOrderNumber && $idempotencyKey) {
+                    $candidateOrder = Order::where('order_number', $requestedOrderNumber)
                         ->first();
 
-                    // Verificar que el idempotency_key coincida en response_data de payment_provider_ticket
-                    if ($activeOrder) {
-                        $paymentTicket = $activeOrder->paymentProviderTickets()
-                            ->where('status', '!=', 'declined')
-                            ->where('status', '!=', 'refunded')
-                            ->latest()
-                            ->first();
-
-                        if ($paymentTicket && isset($paymentTicket->response_data['idempotency_key'])) {
-                            if ($paymentTicket->response_data['idempotency_key'] !== $idempotencyKey) {
-                                // Idempotency_key no coincide, buscar nueva orden
-                                $activeOrder = null;
-                            }
-                        }
+                    if (!$candidateOrder) {
+                        return [
+                            'success' => false,
+                            'message' => 'La orden indicada no existe',
+                            'error_code' => 'ORDER_NOT_FOUND',
+                        ];
                     }
+
+                    if (!in_array($candidateOrder->status, [
+                        Order::STATUS_DRAFT,
+                        Order::STATUS_RESERVED,
+                        Order::STATUS_PAYMENT_PROCESSING,
+                    ], true)) {
+                        return [
+                            'success' => false,
+                            'message' => 'La orden indicada no está en estado reutilizable',
+                            'error_code' => 'ORDER_NOT_REUSABLE',
+                        ];
+                    }
+
+                    $hasPaymentInProgress = $candidateOrder->paymentProviderTickets()
+                        ->whereIn('status', ['processing', 'pending', 'queued'])
+                        ->exists();
+
+                    if ($hasPaymentInProgress && $paymentMethod !== 'terminal') {
+                        return [
+                            'success' => false,
+                            'message' => 'La orden tiene un pago en progreso',
+                            'error_code' => 'ORDER_PAYMENT_IN_PROGRESS',
+                        ];
+                    }
+
+                    $isOrderOwner = $candidateOrder->customer_email === $customerEmail
+                        || ($currentUserId && (int) $candidateOrder->user_id === (int) $currentUserId);
+
+                    if (!$isOrderOwner) {
+                        return [
+                            'success' => false,
+                            'message' => 'La orden indicada no pertenece al cliente autenticado',
+                            'error_code' => 'ORDER_OWNERSHIP_MISMATCH',
+                        ];
+                    }
+
+                    $paymentTicket = $candidateOrder->paymentProviderTickets()
+                        ->whereNotIn('status', ['declined', 'refunded'])
+                        ->latest()
+                        ->first();
+
+                    $storedIdempotencyKey = $paymentTicket?->response_data['idempotency_key'] ?? null;
+                    if ($storedIdempotencyKey !== null && $storedIdempotencyKey !== $idempotencyKey) {
+                        return [
+                            'success' => false,
+                            'message' => 'La idempotency_key no coincide con la orden indicada',
+                            'error_code' => 'IDEMPOTENCY_KEY_MISMATCH',
+                        ];
+                    }
+
+                    $activeOrder = $candidateOrder;
                 }
 
                 // PASO 2: Reutilizar orden o crear nueva
                 $totalPrice = count($seatIds) * $screening->price;
+                $isReusedOrder = false;
                 
-                if ($activeOrder && in_array($activeOrder->status, [
-                    Order::STATUS_RESERVED,
-                    Order::STATUS_PAYMENT_PROCESSING,
-                ])) {
+                if ($activeOrder) {
                     // Reutilizar orden existente
                     Log::info("Reutilizando orden activa", [
                         'order_id' => $activeOrder->id,
                         'order_number' => $activeOrder->order_number,
                     ]);
                     $order = $activeOrder;
+                    $isReusedOrder = true;
                     $order->update([
+                        'screening_id' => $validated['screening_id'],
+                        'customer_name' => $validated['customer_name'] ?? null,
+                        'customer_email' => $customerEmail,
+                        'customer_phone' => $validated['customer_phone'] ?? null,
                         'total_amount' => $totalPrice,
-                        'reserved_until' => now()->addMinutes(5),
+                        'status' => Order::STATUS_RESERVED,
+                        'purchase_device' => $paymentMethod ?? 'web',
+                        'ip_address' => $request->ip(),
+                        'reserved_until' => now()->addMinutes(6),
                     ]);
                 } else {
                     // Crear nueva orden
@@ -311,7 +371,7 @@ class PaymentController extends Controller
                     $order = Order::create([
                         'uuid' => Str::uuid(),
                         'order_number' => OrderNumberGenerator::generate(),
-                        'customer_name' => $validated['customer_name'],
+                        'customer_name' => $validated['customer_name'] ?? null,
                         'customer_email' => $customerEmail,
                         'customer_phone' => $validated['customer_phone'] ?? null,
                         'user_id' => $userId,
@@ -334,10 +394,7 @@ class PaymentController extends Controller
                 $this->inventoryService->ensureScreeningSeats($screening->id);
 
                 // Si se reutiliza orden, limpiar reservas anteriores antes de reservar nuevos asientos
-                if ($activeOrder && in_array($activeOrder->status, [
-                    Order::STATUS_RESERVED,
-                    Order::STATUS_PAYMENT_PROCESSING,
-                ])) {
+                if ($isReusedOrder) {
                     $this->inventoryService->releaseSeatsByOrder(
                         $order->id,
                         'order_refreshed_before_new_reservation'
@@ -395,6 +452,7 @@ class PaymentController extends Controller
                 $additionalData['seat_count'] = count($seatIds);
                 $additionalData['seat_ids'] = $seatIds;
                 $additionalData['payment_method'] = $paymentMethod ?? 'redirect';
+                $additionalData['order_number'] = $order->order_number;
                 
                 if ($idempotencyKey) {
                     $additionalData['idempotency_key'] = $idempotencyKey;
@@ -432,6 +490,12 @@ class PaymentController extends Controller
                     'transaction_id' => $paymentResult['transaction_id'] ?? 'N/A',
                 ]);
 
+                $idempotencyKeyOut = $idempotencyKey;
+                if (!$idempotencyKeyOut && !empty($paymentResult['payment_ticket_id'])) {
+                    $paymentTicketOut = PaymentProviderTicket::find($paymentResult['payment_ticket_id']);
+                    $idempotencyKeyOut = $paymentTicketOut?->response_data['idempotency_key'] ?? null;
+                }
+
                 return [
                     'success' => true,
                     'order_id' => $order->id,
@@ -442,6 +506,7 @@ class PaymentController extends Controller
                     'expires_in_minutes' => 6,
                     'transaction_id' => $paymentResult['transaction_id'] ?? null,
                     'payment_ticket_id' => $paymentResult['payment_ticket_id'] ?? null,
+                    'idempotency_key' => $idempotencyKeyOut,
                     'redirect_url' => $paymentResult['redirect_url'] ?? null,
                     'qr_data' => $paymentResult['qr_data'] ?? null,
                     'qr_code' => $paymentResult['qr_code'] ?? null,
@@ -776,11 +841,14 @@ class PaymentController extends Controller
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'exists:seats,id',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
+                'order_number' => 'nullable|string|max:50',
+                'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'nullable|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
+                'additional_data.order_number' => 'nullable|string|max:50',
             ]);
 
             $validated['additional_data'] = $validated['additional_data'] ?? [];
@@ -819,11 +887,14 @@ class PaymentController extends Controller
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'exists:seats,id',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
+                'order_number' => 'nullable|string|max:50',
+                'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'nullable|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
+                'additional_data.order_number' => 'nullable|string|max:50',
                 'terminal_id' => 'nullable|string|max:50',
             ]);
 
