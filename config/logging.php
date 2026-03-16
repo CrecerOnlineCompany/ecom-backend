@@ -126,6 +126,14 @@ return [
         'emergency' => [
             'path' => storage_path('logs/laravel.log'),
         ],
+
+        'room_seats' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/room_seats.log'),
+            'level' => env('LOG_LEVEL', 'debug'),
+            'days' => 14,
+            'replace_placeholders' => true,
+        ],
     ],
 
 ];

@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\Ticket;
+use App\Models\TicketDetail;
 use App\Models\ScreeningSeat;
 use App\Enums\PaymentStatus;
 use App\Exceptions\InvalidSeatOwnershipException;
@@ -202,6 +203,9 @@ class OrderFinalizationService
                         'ticket_number' => $ticketNumber,
                         'purchased_at' => now(),
                     ]);
+
+                    // Ensure per-seat detail record exists/updated for this ticket.
+                    $this->upsertTicketDetail($ticket, (int) $order->screening_id);
 
                     Log::info("Ticket finalized", [
                         'ticket_id' => $ticket->id,
@@ -661,8 +665,15 @@ class OrderFinalizationService
                     $ticket->update(['ticket_sequence' => $sequence]);
                 }
 
+                // Populate denormalized columns used by admin/reporting.
+                $ticket->populateDenormalizedFields();
+                $ticket->save();
+
                 $ticket->ticket_number = sprintf("%s-%06d", now()->year, $ticket->id);
                 $ticket->save();
+
+                // Ensure per-seat detail record exists/updated for this ticket.
+                $this->upsertTicketDetail($ticket, (int) $order->screening_id);
 
                 Log::info("Ticket created from reservation", [
                     'ticket_id' => $ticket->id,
@@ -745,5 +756,51 @@ class OrderFinalizationService
         $this->hasTicketSequenceColumn = Schema::hasColumn('tickets', 'ticket_sequence');
 
         return $this->hasTicketSequenceColumn;
+    }
+
+    /**
+     * Create or update the ticket_details row associated to a ticket.
+     * One ticket = one seat detail in current order-first flow.
+     */
+    private function upsertTicketDetail(Ticket $ticket, int $screeningId): void
+    {
+        $ticket->loadMissing('seat');
+
+        $seatCode = $ticket->seat_code ?: $ticket->seat?->seat_code;
+        $rowNumber = $ticket->row_number ?: $ticket->seat?->row_number;
+        $seatNumber = $ticket->seat_number ?: $ticket->seat?->seat_number;
+
+        if (!$seatCode || $rowNumber === null || $seatNumber === null) {
+            Log::warning("Skipping ticket detail upsert due to missing seat data", [
+                'ticket_id' => $ticket->id,
+                'screening_id' => $screeningId,
+                'seat_id' => $ticket->seat_id,
+            ]);
+            return;
+        }
+
+        TicketDetail::updateOrCreate(
+            ['ticket_id' => $ticket->id],
+            [
+                'screening_id' => $screeningId,
+                'seat_id' => $ticket->seat_id,
+                'seat_code' => $seatCode,
+                'row_number' => (int) $rowNumber,
+                'seat_number' => (int) $seatNumber,
+                'price' => $ticket->price,
+                'status' => $this->mapTicketStatusToDetailStatus($ticket->status),
+                'qr_code' => $ticket->qr_code,
+                'used_at' => $ticket->used_at,
+            ]
+        );
+    }
+
+    private function mapTicketStatusToDetailStatus(?string $ticketStatus): string
+    {
+        return match ($ticketStatus) {
+            'cancelled', PaymentStatus::STATUS_CANCELLED => 'cancelled',
+            'used' => 'used',
+            default => 'confirmed',
+        };
     }
 }

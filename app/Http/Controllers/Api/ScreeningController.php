@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Screening;
 use App\Models\ScreeningSeat;
 use App\Models\Room;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Log;
@@ -31,9 +32,28 @@ class ScreeningController extends Controller
         }
 
         if ($request->has('date')) {
-            $date = $request->date;
-            $query->whereDate('start_time', $date);
+
+            $date = Carbon::parse($request->date);
+
+            $query->whereBetween('start_time', [
+                $date->copy()->startOfDay(),
+                $date->copy()->endOfDay()
+            ]);
+
+            if ($date->isToday()) {
+                $query->where('start_time', '>=', now());
+            }
+        } else {
+
+            $query->where('start_time', '>=', now());
         }
+
+        if ($request->has('is_active')) {
+            $query->where('is_active', $request->boolean('is_active'));
+        } else {
+            $query->where('is_active', true);
+        }
+
 
         $screenings = $query->orderBy('start_time')->paginate(20);
         return response()->json($screenings);
@@ -105,7 +125,15 @@ class ScreeningController extends Controller
      */
     public function availableSeats(Screening $screening): JsonResponse
     {
-
+        if ($screening->start_time && $screening->start_time->isPast()) {
+            return response()->json([
+                'screening_id' => $screening->id,
+                'total_seats' => $screening->room->total_seats,
+                'booked_seats_count' => 0,
+                'available_seats_count' => 0,
+                'seats' => [],
+            ]);
+        }
         $blockedSeatIds = ScreeningSeat::where('screening_id', $screening->id)
             ->where(function ($query) {
                 $query->where('status', ScreeningSeat::STATUS_SOLD)
@@ -115,7 +143,7 @@ class ScreeningController extends Controller
             })
             ->pluck('seat_id')
             ->toArray();
-        
+
         $availableSeats = $screening->room->seats()
             ->whereNotIn('id', $blockedSeatIds)
             ->where('is_active', true)

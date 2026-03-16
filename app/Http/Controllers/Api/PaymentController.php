@@ -301,7 +301,7 @@ class PaymentController extends Controller
                     $order = $activeOrder;
                     $order->update([
                         'total_amount' => $totalPrice,
-                        'reserved_until' => now()->addMinutes(6),
+                        'reserved_until' => now()->addMinutes(5),
                     ]);
                 } else {
                     // Crear nueva orden
@@ -950,10 +950,11 @@ class PaymentController extends Controller
             }
 
             // CASO 2: Sin tickets - Proceder con cancelación
-            DB::transaction(function () use ($order) {
+            $inventoryService = $this->inventoryService;
+            DB::transaction(function () use ($order, $inventoryService) {
                 // Liberar asientos reservados
-                $releasedSeats = $this->inventoryService->releaseSeatsByOrder(
-                    $order->id,
+                $releasedSeats = $inventoryService->releaseSeatsByOrder(
+                    (int)$order->id,
                     'order_cancellation'
                 );
 
@@ -973,8 +974,7 @@ class PaymentController extends Controller
                     'order_id' => $order->id,
                     'released_seats' => $releasedSeats,
                 ]);
-            });
-
+            }, attempts: 3);
             return response()->json([
                 'success' => true,
                 'message' => 'Orden cancelada correctamente',

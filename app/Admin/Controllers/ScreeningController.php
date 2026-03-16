@@ -8,6 +8,8 @@ use App\Models\Room;
 use App\Models\Seat;
 use App\Models\Order;
 use App\Models\ScreeningSeat;
+use App\Admin\Actions\Screenings\SyncSeats;
+use App\Admin\Actions\Screenings\BatchSyncSeats;
 use App\Services\ScreeningImportExportService;
 use App\Services\SeatInventoryService;
 use App\Services\OrderNumberGenerator;
@@ -19,6 +21,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Carbon\Carbon;
 
 class ScreeningController extends AdminController
 {
@@ -62,6 +65,13 @@ class ScreeningController extends AdminController
             $tools->append('<a class="btn btn-sm btn-success" href="' . route('admin.screenings.export.excel') . '" target="_blank"><i class="fa fa-download"></i> Excel</a>');
             $tools->append('<a class="btn btn-sm btn-info" href="' . route('admin.screenings.export.csv') . '" target="_blank"><i class="fa fa-download"></i> CSV</a>');
             $tools->append('<a class="btn btn-sm btn-warning" href="' . route('admin.screenings.import.form') . '"><i class="fa fa-upload"></i> Importar</a>');
+            $tools->batch(function (Grid\Tools\BatchActions $batch) {
+                $batch->add(new BatchSyncSeats());
+            });
+        });
+
+        $grid->actions(function ($actions) {
+            $actions->add(new SyncSeats());
         });
 
         return $grid;
@@ -339,6 +349,7 @@ class ScreeningController extends AdminController
         $roomId = (int) request()->input('room_id');
         if ($roomId > 0) {
             $this->pendingExcludedSeatIds = $this->filterSeatIdsByRoom($this->pendingExcludedSeatIds, $roomId);
+            $this->mergeAvailableSeatsFromRoom($roomId);
         }
         request()->request->remove('excluded_seat_ids');
         Log::info('Admin screening store: excluded_seat_ids extracted', [
@@ -359,6 +370,7 @@ class ScreeningController extends AdminController
         }
         if ($roomId > 0) {
             $this->pendingExcludedSeatIds = $this->filterSeatIdsByRoom($this->pendingExcludedSeatIds, $roomId);
+            $this->mergeAvailableSeatsFromRoom($roomId);
         }
         request()->request->remove('excluded_seat_ids');
         Log::info('Admin screening update: excluded_seat_ids extracted', [
@@ -519,6 +531,34 @@ HTML;
         return array_values(array_unique($validIds));
     }
 
+    private function mergeAvailableSeatsFromRoom(int $roomId): void
+    {
+        $room = Room::query()
+            ->withCount(['seats as active_seats_count' => function ($query) {
+                $query->where('is_active', true);
+            }])
+            ->find($roomId);
+
+        if (!$room) {
+            Log::warning('Admin screening: room not found while setting available_seats', [
+                'room_id' => $roomId,
+            ]);
+            return;
+        }
+
+        $availableSeats = (int) $room->active_seats_count;
+        if ($availableSeats <= 0 && !is_null($room->total_seats)) {
+            $availableSeats = (int) $room->total_seats;
+        }
+
+        request()->merge(['available_seats' => $availableSeats]);
+
+        Log::info('Admin screening: available_seats set from room', [
+            'room_id' => $roomId,
+            'available_seats' => $availableSeats,
+        ]);
+    }
+
     /**
      * Exportar screenings a Excel
      */
@@ -541,6 +581,143 @@ HTML;
     public function showImportForm()
     {
         return view('admin.screenings.import');
+    }
+
+    public function showWeeklyScreeningsForm()
+    {
+        $movies = Movie::query()
+            ->where('is_active', true)
+            ->orderBy('title')
+            ->get();
+
+        $rooms = Room::query()
+            ->where('is_active', true)
+            ->with('cinema')
+            ->orderBy('cinema_id')
+            ->orderBy('name')
+            ->get();
+
+        return view('admin.screenings.weekly-screenings', [
+            'movies' => $movies,
+            'rooms' => $rooms,
+        ]);
+    }
+
+    public function storeWeeklyScreenings(Request $request)
+    {
+        $validated = $request->validate([
+            'movie_id' => 'required|integer|exists:movies,id',
+            'room_id' => 'required|integer|exists:rooms,id',
+            'start_date' => 'required|date',
+            'end_date' => 'required|date',
+            'weekdays' => 'required|array|min:1',
+            'weekdays.*' => 'in:0,1,2,3,4,5,6',
+            'start_time' => 'required|date_format:H:i',
+            'price' => 'required|numeric|min:0.01',
+            'format' => 'required|string',
+            'is_active' => 'required|in:0,1',
+        ]);
+
+        $movie = Movie::query()
+            ->whereKey((int) $validated['movie_id'])
+            ->where('is_active', true)
+            ->first();
+
+        if (!$movie) {
+            return redirect()
+                ->back()
+                ->withErrors(['movie_id' => 'No se encontró la película activa seleccionada.'])
+                ->withInput();
+        }
+
+        $room = Room::find((int) $validated['room_id']);
+        if (!$room) {
+            return redirect()
+                ->back()
+                ->withErrors(['room_id' => 'No se encontró la sala seleccionada.'])
+                ->withInput();
+        }
+
+        $startDate = Carbon::parse($validated['start_date'])->startOfDay();
+        $endDate = Carbon::parse($validated['end_date'])->endOfDay();
+        if ($endDate->lt($startDate)) {
+            return redirect()
+                ->back()
+                ->withErrors(['end_date' => 'La fecha hasta debe ser mayor o igual a la fecha desde.'])
+                ->withInput();
+        }
+
+        $durationMinutes = (int) $movie->duration;
+        if ($durationMinutes <= 0) {
+            return redirect()
+                ->back()
+                ->withErrors(['duration' => 'La película no tiene duración válida.'])
+                ->withInput();
+        }
+
+        $weekdays = array_map('intval', $validated['weekdays']);
+        $time = $validated['start_time'];
+        $price = (float) $validated['price'];
+        $format = (string) $validated['format'];
+        $isActive = (int) $validated['is_active'] === 1;
+
+        $availableSeats = $this->getAvailableSeatsForRoom($room);
+
+        $created = 0;
+        $skipped = 0;
+
+        DB::transaction(function () use (
+            $movie,
+            $room,
+            $startDate,
+            $endDate,
+            $weekdays,
+            $time,
+            $price,
+            $format,
+            $isActive,
+            $durationMinutes,
+            $availableSeats,
+            &$created,
+            &$skipped
+        ) {
+            $cursor = $startDate->copy();
+            while ($cursor->lte($endDate)) {
+                if (in_array($cursor->dayOfWeek, $weekdays, true)) {
+                    $startTime = Carbon::parse($cursor->format('Y-m-d') . ' ' . $time);
+
+                    $exists = Screening::query()
+                        ->where('room_id', $room->id)
+                        ->where('start_time', $startTime)
+                        ->exists();
+
+                    if ($exists) {
+                        $skipped++;
+                    } else {
+                        Screening::create([
+                            'movie_id' => $movie->id,
+                            'room_id' => $room->id,
+                            'start_time' => $startTime,
+                            'end_time' => $startTime->copy()->addMinutes($durationMinutes),
+                            'price' => $price,
+                            'format' => $format,
+                            'available_seats' => $availableSeats,
+                            'is_active' => $isActive,
+                        ]);
+                        $created++;
+                    }
+                }
+
+                $cursor->addDay();
+            }
+        });
+
+        return redirect()
+            ->route('admin.screenings.weekly-screenings.form')
+            ->with('weekly_screenings_result', [
+                'created' => $created,
+                'skipped' => $skipped,
+            ]);
     }
 
     /**
@@ -566,5 +743,19 @@ HTML;
                 'message' => 'Error al procesar archivo: ' . $e->getMessage(),
             ], 422);
         }
+    }
+
+    private function getAvailableSeatsForRoom(Room $room): int
+    {
+        $activeSeats = Seat::query()
+            ->where('room_id', $room->id)
+            ->where('is_active', true)
+            ->count();
+
+        if ($activeSeats <= 0 && !is_null($room->total_seats)) {
+            $activeSeats = (int) $room->total_seats;
+        }
+
+        return (int) $activeSeats;
     }
 }

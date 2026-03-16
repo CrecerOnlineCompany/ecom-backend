@@ -56,7 +56,7 @@ Route::post('/payment-process-qr', [PaymentController::class, 'processQrPayment'
 Route::post('/payment-process-terminal', [PaymentController::class, 'processTerminalPayment']);
 Route::get('/payment-status/{paymentTicketId}', [PaymentController::class, 'status']);
 Route::get('/payment-order/{orderNumber}/details', [PaymentController::class, 'orderDetails']);
-Route::delete('/payment-cancel/{paymentTicketId}', [PaymentController::class, 'cancelPendingPayment']);
+//Route::delete('/payment-cancel/{paymentTicketId}', [PaymentController::class, 'cancelPendingPayment']);
 Route::post('/payment-cancel', [PaymentController::class, 'cancelOrderByNumber']);
 Route::delete('/payment-cleanup', [PaymentController::class, 'cleanup']);
 Route::get('/qr-payment/confirm/{paymentTicketId}/{token}', [PaymentController::class, 'confirmQrPayment']);

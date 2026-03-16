@@ -3,11 +3,18 @@
 namespace App\Admin\Controllers;
 
 use App\Models\Movie;
+use App\Models\Room;
+use App\Models\Screening;
+use App\Models\Seat;
+use App\Admin\Actions\Movies\WeeklyScreeningsForm;
 use OpenAdmin\Admin\Controllers\AdminController;
 use OpenAdmin\Admin\Form;
 use OpenAdmin\Admin\Grid;
 use OpenAdmin\Admin\Show;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class MovieController extends AdminController
 {
@@ -36,6 +43,10 @@ class MovieController extends AdminController
             return \Carbon\Carbon::parse($value)->format('d/m/Y');
         });
         $grid->column('is_active', __('admin.status'))->bool()->sortable();
+
+        $grid->actions(function ($actions) {
+            $actions->add(new WeeklyScreeningsForm());
+        });
 
         return $grid;
     }
@@ -122,5 +133,138 @@ class MovieController extends AdminController
         if ($movie->poster_image) {
             Storage::disk('admin')->delete($movie->poster_image);
         }
+    }
+
+    public function showWeeklyScreeningsForm(Movie $movie)
+    {
+        $rooms = Room::query()
+            ->where('is_active', true)
+            ->with('cinema')
+            ->orderBy('cinema_id')
+            ->orderBy('name')
+            ->get();
+
+        return view('admin.movies.weekly-screenings', [
+            'movie' => $movie,
+            'rooms' => $rooms,
+        ]);
+    }
+
+    public function storeWeeklyScreenings(Request $request, Movie $movie)
+    {
+        $validated = $request->validate([
+            'room_id' => 'required|integer|exists:rooms,id',
+            'start_date' => 'required|date',
+            'end_date' => 'required|date',
+            'weekdays' => 'required|array|min:1',
+            'weekdays.*' => 'in:0,1,2,3,4,5,6',
+            'start_time' => 'required|date_format:H:i',
+            'price' => 'required|numeric|min:0.01',
+            'format' => 'required|string',
+            'is_active' => 'required|in:0,1',
+        ]);
+
+        $room = Room::find((int) $validated['room_id']);
+        if (!$room) {
+            return redirect()
+                ->back()
+                ->withErrors(['room_id' => 'No se encontró la sala seleccionada.'])
+                ->withInput();
+        }
+
+        $startDate = Carbon::parse($validated['start_date'])->startOfDay();
+        $endDate = Carbon::parse($validated['end_date'])->endOfDay();
+        if ($endDate->lt($startDate)) {
+            return redirect()
+                ->back()
+                ->withErrors(['end_date' => 'La fecha hasta debe ser mayor o igual a la fecha desde.'])
+                ->withInput();
+        }
+
+        $durationMinutes = (int) $movie->duration;
+        if ($durationMinutes <= 0) {
+            return redirect()
+                ->back()
+                ->withErrors(['duration' => 'La película no tiene duración válida.'])
+                ->withInput();
+        }
+
+        $weekdays = array_map('intval', $validated['weekdays']);
+        $time = $validated['start_time'];
+        $price = (float) $validated['price'];
+        $format = (string) $validated['format'];
+        $isActive = (int) $validated['is_active'] === 1;
+
+        $availableSeats = $this->getAvailableSeatsForRoom($room);
+
+        $created = 0;
+        $skipped = 0;
+
+        DB::transaction(function () use (
+            $movie,
+            $room,
+            $startDate,
+            $endDate,
+            $weekdays,
+            $time,
+            $price,
+            $format,
+            $isActive,
+            $durationMinutes,
+            $availableSeats,
+            &$created,
+            &$skipped
+        ) {
+            $cursor = $startDate->copy();
+            while ($cursor->lte($endDate)) {
+                if (in_array($cursor->dayOfWeek, $weekdays, true)) {
+                    $startTime = Carbon::parse($cursor->format('Y-m-d') . ' ' . $time);
+
+                    $exists = Screening::query()
+                        ->where('room_id', $room->id)
+                        ->where('start_time', $startTime)
+                        ->exists();
+
+                    if ($exists) {
+                        $skipped++;
+                    } else {
+                        Screening::create([
+                            'movie_id' => $movie->id,
+                            'room_id' => $room->id,
+                            'start_time' => $startTime,
+                            'end_time' => $startTime->copy()->addMinutes($durationMinutes),
+                            'price' => $price,
+                            'format' => $format,
+                            'available_seats' => $availableSeats,
+                            'is_active' => $isActive,
+                        ]);
+                        $created++;
+                    }
+                }
+
+                $cursor->addDay();
+            }
+        });
+
+        return redirect()
+            ->route('admin.movies.weekly-screenings.form', ['movie' => $movie->id])
+            ->with('weekly_screenings_result', [
+                'created' => $created,
+                'skipped' => $skipped,
+            ]);
+    }
+
+    private function getAvailableSeatsForRoom(Room $room): int
+    {
+        $activeSeats = Seat::query()
+            ->where('room_id', $room->id)
+            ->where('is_active', true)
+            ->count();
+
+        if ($activeSeats <= 0 && !is_null($room->total_seats)) {
+            $activeSeats = (int) $room->total_seats;
+        }
+
+        return (int) $activeSeats;
     }
 }

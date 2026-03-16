@@ -24,6 +24,11 @@ class MovieController extends Controller
             $query->where('genre', $request->genre);
         }
 
+        $query->whereHas('screenings', function ($screeningQuery) {
+            $screeningQuery->where('is_active', true)
+                ->where('start_time', '>=', now());
+        });
+
         $movies = $query->orderBy('release_date', 'desc')->paginate(15);
         
         // Agregar URL de imagen a cada película

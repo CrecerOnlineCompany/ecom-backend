@@ -304,11 +304,17 @@ class PaymentProviderController extends AdminController
         
         // Botón para obtener POS
         $form->html($this->getMercadoPagoPoSModal());
+
+        // Botón para crear Store/Sucursal
+        $form->html($this->getMercadoPagoCreateStoreModal());
         
         $form->text('config.store_id', 'Store ID / POS ID')
             ->placeholder('Ej: 123456')
             ->attribute('data-mercado-pago-field', 'true')
             ->help('<strong>REQUERIDO</strong> para usar Mercado Pago. Identificador único de tu sucursal o punto de venta.');
+
+        // Botón para crear POS
+        $form->html($this->getMercadoPagoCreatePosModal());
         
         $form->text('config.currency_id', 'ID Moneda')
             ->default('ARS')
@@ -358,6 +364,9 @@ class PaymentProviderController extends AdminController
             ->placeholder('Ej: PAX_A910__SMARTPOS1494545656')
             ->help('ID de la terminal. Este campo es REQUERIDO si "Pago por Terminal Smart" está habilitado.')
             ->attribute('data-mercado-pago-field', 'true');
+
+        // Botón para actualizar modo de operación de terminal
+        $form->html($this->getMercadoPagoUpdateOperationModeModal());
         
         $form->switch('config.auto_send', 'Envío Automático a Terminal')
             ->help('Si está habilitado, la orden se enviará automáticamente a la terminal POS.')
@@ -384,6 +393,30 @@ class PaymentProviderController extends AdminController
     private function getMercadoPagoPoSModal(): string
     {
         return view('payment_provider.mp_pos_modal')->render();
+    }
+
+    /**
+     * Modal HTML para crear Store/Sucursal en Mercado Pago
+     */
+    private function getMercadoPagoCreateStoreModal(): string
+    {
+        return view('payment_provider.mp_create_store_modal')->render();
+    }
+
+    /**
+     * Modal HTML para crear POS en Mercado Pago
+     */
+    private function getMercadoPagoCreatePosModal(): string
+    {
+        return view('payment_provider.mp_create_pos_modal')->render();
+    }
+
+    /**
+     * Modal HTML para actualizar modo de operación de terminal
+     */
+    private function getMercadoPagoUpdateOperationModeModal(): string
+    {
+        return view('payment_provider.mp_update_operation_mode_modal')->render();
     }
 
 
@@ -629,6 +662,255 @@ HTML;
             return response()->json([
                 'error' => 'Error al obtener POS: ' . $e->getMessage(),
                 'hint' => 'Revisa los logs para más detalles',
+            ], 500);
+        }
+    }
+
+    /**
+     * Crear Store/Sucursal en Mercado Pago
+     */
+    public function createMercadoPagoStore()
+    {
+        $token = request()->input('token');
+        $userId = request()->input('user_id');
+        $name = request()->input('name');
+        $externalId = request()->input('external_id');
+        $cityName = request()->input('city_name');
+        $stateName = request()->input('state_name');
+        $latitude = request()->input('latitude');
+        $longitude = request()->input('longitude');
+
+        if (!$token || !$userId || !$name || !$externalId || !$cityName || !$stateName || $latitude === null || $longitude === null) {
+            return response()->json([
+                'error' => 'Faltan campos requeridos',
+                'hint' => 'Revisa Access Token, User ID, name, external_id, city_name, state_name, latitude y longitude',
+            ], 400);
+        }
+        if (!is_numeric($latitude) || !is_numeric($longitude)) {
+            return response()->json([
+                'error' => 'Latitud/Longitud invalidas',
+                'hint' => 'Ingresa valores numericos para latitude y longitude',
+            ], 400);
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client([
+                'timeout' => 10,
+            ]);
+
+            $payload = [
+                'name' => $name,
+                'external_id' => $externalId,
+                'location' => [
+                    'city_name' => $cityName,
+                    'state_name' => $stateName,
+                    'latitude' => (float) $latitude,
+                    'longitude' => (float) $longitude,
+                ],
+            ];
+
+            $streetName = request()->input('street_name');
+            $streetNumber = request()->input('street_number');
+
+            if ($streetName) {
+                $payload['location']['street_name'] = $streetName;
+            }
+            if ($streetNumber) {
+                $payload['location']['street_number'] = $streetNumber;
+            }
+
+            $endpoint = 'https://api.mercadopago.com/users/' . $userId . '/stores';
+
+            $response = $client->request('POST', $endpoint, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => 'Cinelar Admin',
+                ],
+                'http_errors' => false,
+                'json' => $payload,
+            ]);
+
+            $statusCode = $response->getStatusCode();
+            $data = json_decode($response->getBody(), true);
+
+            if ($statusCode >= 400) {
+                return response()->json([
+                    'error' => $data['message'] ?? 'Error al crear sucursal',
+                    'hint' => $data['error'] ?? 'Verifica los campos y permisos del token',
+                    'code' => $statusCode,
+                ], $statusCode);
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'store' => $data,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error creating MP store:', [
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+
+            return response()->json([
+                'error' => 'Error al crear sucursal: ' . $e->getMessage(),
+                'hint' => 'Revisa los logs para mas detalles',
+            ], 500);
+        }
+    }
+
+    /**
+     * Crear POS en Mercado Pago
+     */
+    public function createMercadoPagoPos()
+    {
+        $token = request()->input('token');
+        $name = request()->input('name');
+        $storeId = request()->input('store_id');
+        $externalStoreId = request()->input('external_store_id');
+        $externalId = request()->input('external_id');
+        $fixedAmount = request()->input('fixed_amount');
+        $category = request()->input('category');
+
+        if (!$token || !$name || !$storeId || !$externalStoreId || !$externalId || $fixedAmount === null || !$category) {
+            return response()->json([
+                'error' => 'Faltan campos requeridos',
+                'hint' => 'Revisa Access Token, name, store_id, external_store_id, external_id, fixed_amount y category',
+            ], 400);
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client([
+                'timeout' => 10,
+            ]);
+
+            $payload = [
+                'name' => $name,
+                'fixed_amount' => filter_var($fixedAmount, FILTER_VALIDATE_BOOLEAN),
+                'store_id' => is_numeric($storeId) ? (int) $storeId : $storeId,
+                'external_store_id' => $externalStoreId,
+                'external_id' => $externalId,
+            ];
+
+            $payload['category'] = is_numeric($category) ? (int) $category : $category;
+
+            $endpoint = 'https://api.mercadopago.com/pos';
+
+            $response = $client->request('POST', $endpoint, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => 'Cinelar Admin',
+                ],
+                'http_errors' => false,
+                'json' => $payload,
+            ]);
+
+            $statusCode = $response->getStatusCode();
+            $data = json_decode($response->getBody(), true);
+
+            if ($statusCode >= 400) {
+                return response()->json([
+                    'error' => $data['message'] ?? 'Error al crear POS',
+                    'hint' => $data['error'] ?? 'Verifica los campos y permisos del token',
+                    'code' => $statusCode,
+                ], $statusCode);
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'pos' => $data,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error creating MP POS:', [
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+
+            return response()->json([
+                'error' => 'Error al crear POS: ' . $e->getMessage(),
+                'hint' => 'Revisa los logs para mas detalles',
+            ], 500);
+        }
+    }
+
+    /**
+     * Actualizar modo de operación de terminal (PATCH)
+     */
+    public function updateMercadoPagoOperationMode()
+    {
+        $token = request()->input('token');
+        $terminalId = request()->input('terminal_id');
+        $operatingMode = request()->input('operating_mode');
+
+        if (!$token || !$terminalId || !$operatingMode) {
+            return response()->json([
+                'error' => 'Faltan campos requeridos',
+                'hint' => 'Revisa Access Token, terminal_id y operating_mode',
+            ], 400);
+        }
+
+        $allowedModes = ['PDV', 'STANDALONE'];
+        if (!in_array($operatingMode, $allowedModes, true)) {
+            return response()->json([
+                'error' => 'Modo invalido',
+                'hint' => 'operating_mode debe ser PDV o STANDALONE',
+            ], 400);
+        }
+
+        try {
+            $client = new \GuzzleHttp\Client([
+                'timeout' => 10,
+            ]);
+
+            $endpoint = 'https://api.mercadopago.com/terminals/v1/setup';
+
+            $payload = [
+                'terminals' => [
+                    [
+                        'id' => $terminalId,
+                        'operating_mode' => $operatingMode,
+                    ],
+                ],
+            ];
+
+            $response = $client->request('PATCH', $endpoint, [
+                'headers' => [
+                    'Authorization' => 'Bearer ' . $token,
+                    'Content-Type' => 'application/json',
+                    'User-Agent' => 'Cinelar Admin',
+                ],
+                'http_errors' => false,
+                'json' => $payload,
+            ]);
+
+            $statusCode = $response->getStatusCode();
+            $data = json_decode($response->getBody(), true);
+
+            if ($statusCode >= 400) {
+                return response()->json([
+                    'error' => $data['message'] ?? 'Error al actualizar modo',
+                    'hint' => $data['error'] ?? 'Verifica los permisos del token y el ID de la terminal',
+                    'code' => $statusCode,
+                ], $statusCode);
+            }
+
+            return response()->json([
+                'status' => 'success',
+                'terminals' => $data['terminals'] ?? $data,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error updating MP terminal operation mode:', [
+                'error' => $e->getMessage(),
+                'file' => $e->getFile(),
+                'line' => $e->getLine(),
+            ]);
+
+            return response()->json([
+                'error' => 'Error al actualizar modo: ' . $e->getMessage(),
+                'hint' => 'Revisa los logs para mas detalles',
             ], 500);
         }
     }

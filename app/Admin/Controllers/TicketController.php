@@ -2,12 +2,14 @@
 
 namespace App\Admin\Controllers;
 
+use App\Services\PdfGenerator;
 use App\Models\Ticket;
 use App\Models\TicketDetail;
 use OpenAdmin\Admin\Controllers\AdminController;
 use OpenAdmin\Admin\Grid;
 use OpenAdmin\Admin\Show;
 use OpenAdmin\Admin\Form;
+use Symfony\Component\HttpFoundation\Response;
 
 class TicketController extends AdminController
 {
@@ -23,13 +25,21 @@ class TicketController extends AdminController
     {
         $grid = new Grid(new Ticket());
 
+        $grid->model()->with(['details', 'screening.movie', 'screening.room.cinema', 'seat'])->orderByDesc('id');
+        $grid->disableCreateButton();
+
         $grid->column('id', __('admin.id'))->sortable();
         $grid->column('ticket_number', __('admin.ticket_number'))->sortable();
         $grid->column('customer_name', 'Cliente')->sortable();
-        $grid->column('movie_title', 'Película')->sortable();
-        $grid->column('cinema_name', 'Cine')->sortable();
-        $grid->column('screening_start_time', 'Función')->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i') : '-';
+        $grid->column('movie_title', 'Película')->display(function ($value) {
+            return $value ?: optional($this->screening?->movie)->title ?: '-';
+        })->sortable();
+        $grid->column('cinema_name', 'Cine')->display(function ($value) {
+            return $value ?: optional($this->screening?->room?->cinema)->name ?: '-';
+        })->sortable();
+        $grid->column('screening_start_time', 'Función')->display(function ($value) {
+            $date = $value ?: optional($this->screening)->start_time;
+            return $date ? \Carbon\Carbon::parse($date)->format('d/m/Y H:i') : '-';
         });
         $grid->column('price', __('admin.price'))->sortable()->display(function ($value) {
             return '$' . number_format($value, 2);
@@ -39,6 +49,14 @@ class TicketController extends AdminController
             'pending_payment' => 'warning',
             'cancelled' => 'danger',
         ]);
+        $grid->column('details', 'Asientos')->display(function () {
+            $seats = $this->details->pluck('seat_code')->filter()->values();
+            if ($seats->isEmpty()) {
+                return $this->seat_code ?: (optional($this->seat)->seat_code ?: '-');
+            }
+
+            return $seats->take(4)->implode(', ') . ($seats->count() > 4 ? ' ...' : '');
+        });
         $grid->column('purchased_at', 'Fecha Compra')->sortable()->display(function ($value) {
             return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
         });
@@ -55,6 +73,10 @@ class TicketController extends AdminController
             $filter->between('purchased_at', 'Fecha Compra');
         });
 
+        $grid->actions(function ($actions) {
+            $actions->disableDelete();
+        });
+
         return $grid;
     }
 
@@ -64,6 +86,14 @@ class TicketController extends AdminController
     protected function detail($id)
     {
         $show = new Show(Ticket::findOrFail($id));
+        $show->panel()->tools(function ($tools) use ($id) {
+            $tools->disableDelete();
+
+            $downloadUrl = route('admin.tickets.thermal-pdf', ['ticket' => $id]);
+            $tools->append(
+                "<a class='btn btn-sm btn-primary' target='_blank' href='{$downloadUrl}'>Descargar PDF Térmico</a>"
+            );
+        });
 
         $show->panel('Información de la Compra', function ($show) {
             $show->field('id', __('admin.id'));
@@ -96,6 +126,15 @@ class TicketController extends AdminController
                 return \Carbon\Carbon::parse($value)->format('d/m/Y H:i');
             });
             $show->field('screening_format', 'Formato');
+            $show->field('seat_code', 'Asiento(s)')->as(function () use ($show) {
+                $ticket = $show->getModel();
+                $seats = $ticket->details->pluck('seat_code')->filter()->values();
+                if ($seats->isNotEmpty()) {
+                    return $seats->implode(', ');
+                }
+
+                return $ticket->seat_code ?: (optional($ticket->seat)->seat_code ?: '-');
+            });
         });
 
         $show->panel('Información de Precios', function ($show) {
@@ -108,6 +147,91 @@ class TicketController extends AdminController
             $show->field('discount_code', 'Código Descuento');
             $show->field('price', 'Precio Total')->as(function ($value) {
                 return '$' . number_format($value, 2);
+            });
+        });
+
+        $show->panel('Orden Asociada', function ($show) {
+            $show->field('order.id', 'ID Orden');
+            $show->field('order.order_number', 'Nro Orden');
+            $show->field('order.status', 'Estado Orden')->as(function ($status) {
+                if (!$status) {
+                    return '-';
+                }
+
+                return match ($status) {
+                    'pending' => 'Pendiente',
+                    'processing' => 'Procesando',
+                    'completed' => 'Completada',
+                    'failed' => 'Fallida',
+                    'cancelled' => 'Cancelada',
+                    'expired' => 'Expirada',
+                    'refunded' => 'Reembolsada',
+                    default => $status,
+                };
+            });
+            $show->field('order.total_amount', 'Total Orden')->as(function ($value) {
+                return $value !== null ? '$' . number_format((float) $value, 2) : '-';
+            });
+            $show->field('order.paid_at', 'Orden Pagada')->as(function ($value) {
+                return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+            });
+        });
+
+        $show->relation('paymentProviders', 'Pagos Asociados', function ($payments) {
+            $payments->column('id', __('admin.id'));
+            $payments->column('paymentProvider.name', 'Proveedor');
+            $payments->column('transaction_id', 'Transacción');
+            $payments->column('reference_number', 'Referencia');
+            $payments->column('status', 'Estado')->label([
+                'pending' => 'warning',
+                'processing' => 'info',
+                'completed' => 'success',
+                'failed' => 'danger',
+                'cancelled' => 'default',
+                'expired' => 'default',
+                'refunded' => 'primary',
+                'approved' => 'success',
+                'declined' => 'danger',
+                'queued' => 'info',
+                'finalization_failed' => 'danger',
+            ]);
+            $payments->column('initiated_at', 'Iniciado')->display(function ($value) {
+                return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+            });
+            $payments->column('completed_at', 'Completado')->display(function ($value) {
+                return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+            });
+            $payments->disableCreateButton();
+            $payments->disableActions();
+            $payments->disableFilter();
+            $payments->disablePagination();
+        });
+
+        $show->panel('Vista Ticket', function ($show) {
+            $show->field('ticket_preview', 'Ticket')->unescape()->as(function () use ($show) {
+                $ticket = $show->getModel();
+                $movie = $ticket->movie_title ?: optional($ticket->screening?->movie)->title ?: '-';
+                $cinema = $ticket->cinema_name ?: optional($ticket->screening?->room?->cinema)->name ?: '-';
+                $room = $ticket->room_name ?: optional($ticket->screening?->room)->name ?: '-';
+                $start = $ticket->screening_start_time ?: optional($ticket->screening)->start_time;
+                $function = $start ? \Carbon\Carbon::parse($start)->format('d/m/Y H:i') : '-';
+                $seats = $ticket->details->pluck('seat_code')->filter()->values();
+                $seatText = $seats->isNotEmpty()
+                    ? $seats->implode(', ')
+                    : ($ticket->seat_code ?: (optional($ticket->seat)->seat_code ?: '-'));
+
+                return "
+                    <div style='font-family: monospace; border:1px dashed #666; padding:10px; max-width:380px'>
+                        <div style='text-align:center;font-weight:bold'>{$cinema}</div>
+                        <div style='text-align:center'>{$room}</div>
+                        <hr>
+                        <div><b>Ticket:</b> {$ticket->ticket_number}</div>
+                        <div><b>Película:</b> {$movie}</div>
+                        <div><b>Función:</b> {$function}</div>
+                        <div><b>Asientos:</b> {$seatText}</div>
+                        <div><b>Total:</b> $" . number_format((float) $ticket->price, 2) . "</div>
+                    </div>
+                ";
             });
         });
 
@@ -139,11 +263,10 @@ class TicketController extends AdminController
                 return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
             });
             
-            // Acciones directas en la tabla
-            $relation->actions(function ($actions) {
-                $actions->disableDelete();
-                $actions->disableCreate();
-            });
+            $relation->disableCreateButton();
+            $relation->disableActions();
+            $relation->disableFilter();
+            $relation->disablePagination();
         });
 
         $show->field('created_at', __('admin.created_at'));
@@ -158,6 +281,10 @@ class TicketController extends AdminController
     protected function form()
     {
         $form = new Form(new Ticket());
+
+        $form->tools(function ($tools) {
+            $tools->disableDelete();
+        });
 
         $form->display('id', __('admin.id'));
         $form->text('ticket_number', 'Número de Entrada')->readonly();
@@ -187,9 +314,7 @@ class TicketController extends AdminController
             $form->display('seat_code', 'Código Asiento');
             $form->display('row_number', 'Fila');
             $form->display('seat_number', 'Número');
-            $form->display('price', 'Precio')->display(function ($value) {
-                return '$' . number_format($value, 2);
-            });
+            $form->display('price', 'Precio');
             
             $form->select('status', 'Estado')->options([
                 'confirmed' => 'Confirmado',
@@ -205,6 +330,25 @@ class TicketController extends AdminController
         $form->display('updated_at', __('admin.updated_at'));
 
         return $form;
+    }
+
+    /**
+     * Download thermal-printer-friendly PDF for a ticket.
+     */
+    public function thermalPdf(int $ticket): Response
+    {
+        $model = Ticket::with(['details', 'screening.movie', 'screening.room.cinema', 'order', 'seat'])
+            ->findOrFail($ticket);
+
+        $pdfGenerator = new PdfGenerator();
+        $pdf = $pdfGenerator->generateThermalTicketPdf($model);
+
+        return response($pdf)
+            ->header('Content-Type', 'application/pdf')
+            ->header('Content-Disposition', sprintf(
+                'inline; filename="ticket-thermal-%s.pdf"',
+                $model->ticket_number ?? $model->id
+            ));
     }
 
     /**

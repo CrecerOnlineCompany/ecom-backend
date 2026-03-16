@@ -252,6 +252,11 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             'idempotency_key' => $idempotencyKey,
             'terminal_id' => $terminalId,
         ]);
+        Log::info('MercadoPagoPoint: Payload enviado a MP (terminal)', [
+            'payment_ticket_id' => $paymentTicket->id,
+            'terminal_id' => $terminalId,
+            'payload' => $payload,
+        ]);
 
         $response = Http::withToken($accessToken)
             ->withHeaders([
@@ -365,6 +370,8 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             'status' => $statusCode,
             'body' => $errorBody,
             'external_reference' => $externalReference,
+            'terminal_id' => $terminalId,
+            'payload' => $payload,
         ]);
 
         return [

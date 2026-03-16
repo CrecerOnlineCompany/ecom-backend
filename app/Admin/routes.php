@@ -18,9 +18,15 @@ Route::group([
 
     // Movies
     $router->resource('movies', 'MovieController');
+    $router->get('movies/{movie}/weekly-screenings', 'MovieController@showWeeklyScreeningsForm')
+        ->name('movies.weekly-screenings.form');
+    $router->post('movies/{movie}/weekly-screenings', 'MovieController@storeWeeklyScreenings')
+        ->name('movies.weekly-screenings.store');
 
     // Rooms
     $router->resource('rooms', 'RoomController');
+    $router->get('rooms/{room}/generate-seats', 'RoomController@generateSeats')->name('rooms.generate-seats');
+    $router->get('rooms/{room}/sync-screenings', 'RoomController@syncScreenings')->name('rooms.sync-screenings');
 
     // Screenings
     $router->resource('screenings', 'ScreeningController');
@@ -30,6 +36,10 @@ Route::group([
     $router->get('screenings/export/csv', 'ScreeningController@exportCsv')->name('screenings.export.csv');
     $router->get('screenings/import/form', 'ScreeningController@showImportForm')->name('screenings.import.form');
     $router->post('screenings/import', 'ScreeningController@importFile')->name('screenings.import');
+    $router->get('screenings/weekly-screenings', 'ScreeningController@showWeeklyScreeningsForm')
+        ->name('screenings.weekly-screenings.form');
+    $router->post('screenings/weekly-screenings', 'ScreeningController@storeWeeklyScreenings')
+        ->name('screenings.weekly-screenings.store');
 
     // Tickets (resource completo - CRUD)
     $router->resource('tickets', 'TicketController');
@@ -46,6 +56,7 @@ Route::group([
     
     // Ruta para anular un ticket
     $router->post('tickets/{ticket}/cancel', 'TicketController@cancel')->name('tickets.cancel');
+    $router->get('tickets/{ticket}/thermal-pdf', 'TicketController@thermalPdf')->name('tickets.thermal-pdf');
     
     // Ticket Details (anidado bajo Tickets)
     $router->resource('ticket-details', 'TicketDetailController');
@@ -54,5 +65,9 @@ Route::group([
     $router->resource('payment-providers', 'PaymentProviderController');
     $router->post('payment-providers/mp-terminals', 'PaymentProviderController@getMercadoPagoTerminals')->name('payment-providers.mp-terminals');
     $router->post('payment-providers/mp-pos', 'PaymentProviderController@getMercadoPagoPos')->name('payment-providers.mp-pos');
+    $router->post('payment-providers/mp-create-store', 'PaymentProviderController@createMercadoPagoStore')->name('payment-providers.mp-create-store');
+    $router->post('payment-providers/mp-create-pos', 'PaymentProviderController@createMercadoPagoPos')->name('payment-providers.mp-create-pos');
+    $router->patch('payment-providers/mp-update-operation-mode', 'PaymentProviderController@updateMercadoPagoOperationMode')->name('payment-providers.mp-update-operation-mode');
+    $router->post('payment-providers/mp-update-operation-mode', 'PaymentProviderController@updateMercadoPagoOperationMode');
 
 });

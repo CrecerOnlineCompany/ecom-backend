@@ -5,6 +5,7 @@ namespace App\Actions\Payments;
 use App\Models\Order;
 use App\Models\PaymentProviderTicket;
 use App\Models\Ticket;
+use App\Models\TicketDetail;
 use App\Services\SeatInventoryService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -142,9 +143,16 @@ class FinalizeOrderPaymentAction
                     'ip_address' => $order->ip_address,
                 ]);
 
+                // Populate denormalized columns used by admin/reporting.
+                $ticket->populateDenormalizedFields();
+                $ticket->save();
+
                 // Generar ticket_number (formato: ORD-{order_number}-{index})
                 $ticketNumber = $this->generateTicketNumber($order->order_number, count($tickets));
                 $ticket->update(['ticket_number' => $ticketNumber]);
+
+                // Ensure per-seat detail record exists/updated for this ticket.
+                $this->upsertTicketDetail($ticket);
 
                 $tickets[] = $ticket->id;
                 
@@ -199,5 +207,38 @@ class FinalizeOrderPaymentAction
     private function generateTicketNumber(string $orderNumber, int $index): string
     {
         return sprintf('ORD-%s-%03d', $orderNumber, $index + 1);
+    }
+
+    private function upsertTicketDetail(Ticket $ticket): void
+    {
+        $ticket->loadMissing('seat');
+
+        $seatCode = $ticket->seat_code ?: $ticket->seat?->seat_code;
+        $rowNumber = $ticket->row_number ?: $ticket->seat?->row_number;
+        $seatNumber = $ticket->seat_number ?: $ticket->seat?->seat_number;
+
+        if (!$seatCode || $rowNumber === null || $seatNumber === null) {
+            Log::warning("FinalizeOrderPaymentAction: missing seat data for ticket detail", [
+                'ticket_id' => $ticket->id,
+                'seat_id' => $ticket->seat_id,
+                'screening_id' => $ticket->screening_id,
+            ]);
+            return;
+        }
+
+        TicketDetail::updateOrCreate(
+            ['ticket_id' => $ticket->id],
+            [
+                'screening_id' => $ticket->screening_id,
+                'seat_id' => $ticket->seat_id,
+                'seat_code' => $seatCode,
+                'row_number' => (int) $rowNumber,
+                'seat_number' => (int) $seatNumber,
+                'price' => $ticket->price,
+                'status' => $ticket->status === 'cancelled' ? 'cancelled' : 'confirmed',
+                'qr_code' => $ticket->qr_code,
+                'used_at' => $ticket->used_at,
+            ]
+        );
     }
 }

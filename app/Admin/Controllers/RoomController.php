@@ -4,6 +4,10 @@ namespace App\Admin\Controllers;
 
 use App\Models\Room;
 use App\Models\Cinema;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Support\Facades\Artisan;
+use App\Admin\Actions\Rooms\GenerateSeats;
+use App\Admin\Actions\Rooms\SyncScreenings;
 use OpenAdmin\Admin\Controllers\AdminController;
 use OpenAdmin\Admin\Form;
 use OpenAdmin\Admin\Grid;
@@ -30,6 +34,11 @@ class RoomController extends AdminController
         $grid->column('type', __('admin.type'));
         $grid->column('total_seats', __('admin.total_seats'))->sortable();
         $grid->column('is_active', __('admin.status'))->bool()->sortable();
+
+        $grid->actions(function ($actions) {
+            $actions->add(new GenerateSeats());
+            $actions->add(new SyncScreenings());
+        });
 
         return $grid;
     }
@@ -81,5 +90,40 @@ class RoomController extends AdminController
         $form->switch('is_active', __('admin.status'))->default(1);
 
         return $form;
+    }
+
+    public function generateSeats(Room $room): RedirectResponse
+    {
+        $exitCode = Artisan::call('rooms:generate-seats', [
+            '--room-id' => $room->id,
+            '--force' => true,
+        ]);
+
+        $output = trim(Artisan::output());
+
+        if ($exitCode === 0) {
+            admin_success('Asientos', "Asientos regenerados correctamente. {$output}");
+        } else {
+            admin_error('Asientos', "Error regenerando asientos. {$output}");
+        }
+
+        return redirect()->route('admin.rooms.index');
+    }
+
+    public function syncScreenings(Room $room): RedirectResponse
+    {
+        $exitCode = Artisan::call('rooms:sync-seats', [
+            '--room-id' => $room->id,
+        ]);
+
+        $output = trim(Artisan::output());
+
+        if ($exitCode === 0) {
+            admin_success('Funciones', "Asientos disponibles sincronizados. {$output}");
+        } else {
+            admin_error('Funciones', "Error sincronizando funciones. {$output}");
+        }
+
+        return redirect()->route('admin.rooms.index');
     }
 }
