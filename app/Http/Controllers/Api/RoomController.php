@@ -37,6 +37,7 @@ class RoomController extends Controller
             'type' => 'required|string',
             'rows' => 'required|integer|min:1',
             'columns' => 'required|integer|min:1',
+            'non_number' => 'boolean',
             'description' => 'nullable|string',
             'is_active' => 'boolean',
         ]);
@@ -67,6 +68,7 @@ class RoomController extends Controller
             'number' => 'sometimes|string',
             'name' => 'sometimes|string',
             'type' => 'sometimes|string',
+            'non_number' => 'sometimes|boolean',
             'description' => 'nullable|string',
             'is_active' => 'boolean',
         ]);
@@ -93,10 +95,8 @@ class RoomController extends Controller
         $columns = $room->columns;
 
         for ($row = 1; $row <= $rows; $row++) {
-            $rowLetter = chr(64 + $row); // A, B, C, etc
-
             for ($col = 1; $col <= $columns; $col++) {
-                $seatCode = $rowLetter . $col;
+                $seatCode = (string) ((($row - 1) * $columns) + $col);
 
                 $room->seats()->create([
                     'row_number' => $row,
@@ -108,4 +108,5 @@ class RoomController extends Controller
             }
         }
     }
+
 }

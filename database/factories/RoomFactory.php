@@ -34,6 +34,7 @@ class RoomFactory extends Factory
             'type' => $this->faker->randomElement($types),
             'rows' => $rows,
             'columns' => $columns,
+            'non_number' => false,
             'description' => $this->faker->optional()->paragraph(),
             'is_active' => true,
         ];

@@ -300,6 +300,7 @@ class DatabaseSeeder extends Seeder
                         'seat_code' => $detail['seat_code'],
                         'row_number' => $detail['row_number'],
                         'seat_number' => $detail['seat_number'],
+                        'room_non_number' => (bool) ($screening->room->non_number ?? false),
                         'price' => $detail['price'],
                         'status' => $status === 'confirmed' ? 'confirmed' : 'pending',
                         'qr_code' => hash('sha256', $ticket->ticket_number . '-' . $detail['seat_code']),
@@ -316,10 +317,8 @@ class DatabaseSeeder extends Seeder
         $columns = $room->columns;
 
         for ($row = 1; $row <= $rows; $row++) {
-            $rowLetter = chr(64 + $row); // A, B, C, etc.
-
             for ($col = 1; $col <= $columns; $col++) {
-                $seatCode = $rowLetter . $col;
+                $seatCode = (string) ((($row - 1) * $columns) + $col);
 
                 $room->seats()->create([
                     'row_number' => $row,
@@ -331,4 +330,5 @@ class DatabaseSeeder extends Seeder
             }
         }
     }
+
 }

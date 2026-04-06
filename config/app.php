@@ -74,6 +74,17 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Screening Timezone
+    |--------------------------------------------------------------------------
+    |
+    | Zona horaria de negocio para funciones de cine (horarios cargados en
+    | admin). Se usa para normalizar entradas/salidas sin offset explícito.
+    |
+    */
+    'screening_timezone' => env('SCREENING_TIMEZONE', 'America/Argentina/Buenos_Aires'),
+
+    /*
+    |--------------------------------------------------------------------------
     | Application Locale Configuration
     |--------------------------------------------------------------------------
     |

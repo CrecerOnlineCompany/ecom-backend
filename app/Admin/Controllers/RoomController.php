@@ -32,6 +32,7 @@ class RoomController extends AdminController
         $grid->column('name', __('admin.name'))->sortable();
         $grid->column('number', __('admin.room_number'));
         $grid->column('type', __('admin.type'));
+        $grid->column('non_number', 'Sin numeración')->bool();
         $grid->column('total_seats', __('admin.total_seats'))->sortable();
         $grid->column('is_active', __('admin.status'))->bool()->sortable();
 
@@ -58,6 +59,7 @@ class RoomController extends AdminController
         $show->field('total_seats', __('admin.total_seats'));
         $show->field('rows', __('admin.rows'));
         $show->field('columns', __('admin.columns'));
+        $show->field('non_number', 'Sin numeración visible')->bool();
         $show->field('description', __('admin.description'));
         $show->field('is_active', __('admin.status'))->bool();
         $show->field('created_at', __('admin.created_at'));
@@ -86,6 +88,8 @@ class RoomController extends AdminController
         ])->default('2D');
         $form->number('rows', __('admin.rows'))->rules('required|integer|min:1');
         $form->number('columns', __('admin.columns'))->rules('required|integer|min:1');
+        $form->switch('non_number', 'Sin numeración visible')->default(0)
+            ->help('Si está activo, los asientos no mostrarán código visible en la app.');
         $form->textarea('description', __('admin.description'))->rules('nullable|string');
         $form->switch('is_active', __('admin.status'))->default(1);
 

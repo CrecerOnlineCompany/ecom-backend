@@ -211,7 +211,7 @@ class FinalizeOrderPaymentAction
 
     private function upsertTicketDetail(Ticket $ticket): void
     {
-        $ticket->loadMissing('seat');
+        $ticket->loadMissing(['seat', 'screening.room']);
 
         $seatCode = $ticket->seat_code ?: $ticket->seat?->seat_code;
         $rowNumber = $ticket->row_number ?: $ticket->seat?->row_number;
@@ -234,6 +234,7 @@ class FinalizeOrderPaymentAction
                 'seat_code' => $seatCode,
                 'row_number' => (int) $rowNumber,
                 'seat_number' => (int) $seatNumber,
+                'room_non_number' => (bool) ($ticket->screening?->room?->non_number ?? false),
                 'price' => $ticket->price,
                 'status' => $ticket->status === 'cancelled' ? 'cancelled' : 'confirmed',
                 'qr_code' => $ticket->qr_code,

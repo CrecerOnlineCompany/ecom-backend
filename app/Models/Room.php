@@ -19,12 +19,14 @@ class Room extends Model
         'type',
         'rows',
         'columns',
+        'non_number',
         'description',
         'is_active',
     ];
 
     protected $casts = [
         'is_active' => 'boolean',
+        'non_number' => 'boolean',
     ];
 
     public function cinema(): BelongsTo

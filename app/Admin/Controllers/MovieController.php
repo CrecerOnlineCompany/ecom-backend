@@ -215,10 +215,15 @@ class MovieController extends AdminController
             &$created,
             &$skipped
         ) {
+            $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
             $cursor = $startDate->copy();
             while ($cursor->lte($endDate)) {
                 if (in_array($cursor->dayOfWeek, $weekdays, true)) {
-                    $startTime = Carbon::parse($cursor->format('Y-m-d') . ' ' . $time);
+                    $startTime = Carbon::createFromFormat(
+                        'Y-m-d H:i',
+                        $cursor->format('Y-m-d') . ' ' . $time,
+                        $businessTimezone
+                    )->utc();
 
                     $exists = Screening::query()
                         ->where('room_id', $room->id)

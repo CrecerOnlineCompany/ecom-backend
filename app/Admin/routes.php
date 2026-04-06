@@ -51,6 +51,13 @@ Route::group([
     $router->resource('orders', 'OrderController');
     $router->get('orders/{order}/sync', 'OrderController@sync')->name('orders.sync');
     
+    // Manual order creation
+    $router->get('orders/manual/create', 'OrderController@showManualCreateForm')->name('orders.manual.create');
+    $router->post('orders/manual/api/movies', 'OrderController@apiGetMovies')->name('orders.api.movies');
+    $router->post('orders/manual/api/screenings', 'OrderController@apiGetScreenings')->name('orders.api.screenings');
+    $router->post('orders/manual/api/seating-chart', 'OrderController@apiGetSeatingChart')->name('orders.api.seating-chart');
+    $router->post('orders/manual/api/store', 'OrderController@apiStoreManualOrder')->name('orders.api.store');
+    
     // Rutas personalizadas para editar details desde tickets
     $router->put('tickets/{ticket}/details/{detail}', 'TicketController@updateDetail')->name('tickets.details.update');
     $router->delete('tickets/{ticket}/details/{detail}', 'TicketController@cancelDetail')->name('tickets.details.cancel');

@@ -17,6 +17,7 @@ class TicketDetail extends Model
         'seat_code',
         'row_number',
         'seat_number',
+        'room_non_number',
         'price',
         'status',
         'qr_code',
@@ -25,6 +26,7 @@ class TicketDetail extends Model
 
     protected $casts = [
         'price' => 'decimal:2',
+        'room_non_number' => 'boolean',
         'used_at' => 'datetime',
     ];
 

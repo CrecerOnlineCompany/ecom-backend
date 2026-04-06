@@ -757,6 +757,7 @@ class PaymentController extends Controller
                             'seat_code' => $detail->seat_code,
                             'row_number' => $detail->row_number,
                             'seat_number' => $detail->seat_number,
+                            'room_non_number' => (bool) ($detail->room_non_number ?? false),
                             'price' => $detail->price,
                             'status' => $detail->status,
                             'qr_code' => $detail->qr_code,

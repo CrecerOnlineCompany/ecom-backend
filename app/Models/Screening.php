@@ -2,6 +2,8 @@
 
 namespace App\Models;
 
+use DateTimeInterface;
+use DateTimeZone;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -61,5 +63,14 @@ class Screening extends Model
     public function cinema()
     {
         return $this->room->cinema();
+    }
+
+    protected function serializeDate(DateTimeInterface $date): string
+    {
+        $timezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
+
+        return (new \Carbon\Carbon($date))
+            ->setTimezone(new DateTimeZone($timezone))
+            ->format('Y-m-d H:i:s');
     }
 }

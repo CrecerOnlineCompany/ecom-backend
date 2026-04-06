@@ -49,11 +49,19 @@ class ScreeningController extends AdminController
     {
         $grid = new Grid(new Screening());
 
+        // Eager load relationships to avoid N+1 queries
+        $grid->model()->with(['movie','room.cinema']);
+
         $grid->column('id', __('admin.id'));
         $grid->column('movie.title', __('admin.movie'));
-        $grid->column('room.cinema.name', __('admin.cinema'));
+        $grid->column('room.cinema.name', __('admin.cinema'))->display(function($value){
+            return $value["name"]??"";
+        });
         $grid->column('room.name', __('admin.room'));
         $grid->column('start_time', __('admin.start_time'))->display(function ($value) {
+            return \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s');
+        });
+         $grid->column('start_end','Hora fin')->display(function ($value) {
             return \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s');
         });
         $grid->column('price', __('admin.price'));
@@ -62,7 +70,6 @@ class ScreeningController extends AdminController
 
         // Tools (botones de acción)
         $grid->tools(function ($tools) {
-            $tools->append('<a class="btn btn-sm btn-primary" href="' . route('admin.screenings.weekly-screenings.form') . '"><i class="fa fa-calendar"></i> Funciones Semanales</a>');
             $tools->append('<a class="btn btn-sm btn-success" href="' . route('admin.screenings.export.excel') . '" target="_blank"><i class="fa fa-download"></i> Excel</a>');
             $tools->append('<a class="btn btn-sm btn-info" href="' . route('admin.screenings.export.csv') . '" target="_blank"><i class="fa fa-download"></i> CSV</a>');
             $tools->append('<a class="btn btn-sm btn-warning" href="' . route('admin.screenings.import.form') . '"><i class="fa fa-upload"></i> Importar</a>');
@@ -346,6 +353,15 @@ class ScreeningController extends AdminController
 
     public function store()
     {
+        foreach (['start_time', 'end_time'] as $field) {
+            $value = request()->input($field);
+            if (!empty($value) && is_string($value)) {
+                request()->merge([
+                    $field => Carbon::parse($value)->addHours(3)->format('Y-m-d H:i:s'),
+                ]);
+            }
+        }
+
         $this->pendingExcludedSeatIds = $this->extractExcludedSeatIdsFromRequest();
         $roomId = (int) request()->input('room_id');
         if ($roomId > 0) {
@@ -364,6 +380,15 @@ class ScreeningController extends AdminController
 
     public function update($id)
     {
+        foreach (['start_time', 'end_time'] as $field) {
+            $value = request()->input($field);
+            if (!empty($value) && is_string($value)) {
+                request()->merge([
+                    $field => Carbon::parse($value)->addHours(3)->format('Y-m-d H:i:s'),
+                ]);
+            }
+        }
+
         $this->pendingExcludedSeatIds = $this->extractExcludedSeatIdsFromRequest();
         $roomId = (int) request()->input('room_id');
         if ($roomId <= 0) {
@@ -682,10 +707,15 @@ HTML;
             &$created,
             &$skipped
         ) {
+            $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
             $cursor = $startDate->copy();
             while ($cursor->lte($endDate)) {
                 if (in_array($cursor->dayOfWeek, $weekdays, true)) {
-                    $startTime = Carbon::parse($cursor->format('Y-m-d') . ' ' . $time);
+                    $startTime = Carbon::createFromFormat(
+                        'Y-m-d H:i',
+                        $cursor->format('Y-m-d') . ' ' . $time,
+                        $businessTimezone
+                    )->utc();
 
                     $exists = Screening::query()
                         ->where('room_id', $room->id)
