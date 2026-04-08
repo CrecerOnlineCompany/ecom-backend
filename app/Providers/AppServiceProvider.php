@@ -7,6 +7,7 @@ use App\Services\PaymentProviders\PaymentProviderManager;
 use App\Services\ScreeningImportExportService;
 use App\Services\ManualOrderService;
 use App\Services\OrderNumberGenerator;
+use App\Services\OrderItemPricingService;
 use App\Services\SeatInventoryService;
 use Illuminate\Support\Facades\URL;
 
@@ -21,7 +22,8 @@ class AppServiceProvider extends ServiceProvider
         $this->app->singleton(ManualOrderService::class, function ($app) {
             return new ManualOrderService(
                 $app->make(OrderNumberGenerator::class),
-                $app->make(SeatInventoryService::class)
+                $app->make(SeatInventoryService::class),
+                $app->make(OrderItemPricingService::class)
             );
         });
 

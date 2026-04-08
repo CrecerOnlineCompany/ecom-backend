@@ -39,6 +39,7 @@ Route::get('/screenings/{screening}/available-seats', [ScreeningController::clas
 Route::get('/payment-providers', [PaymentController::class, 'index']);
 Route::get('/payment-providers/{id}', [PaymentController::class, 'show']);
 Route::get('/payment-methods', [PaymentController::class, 'getMethods']);
+Route::get('/concession-products', [PaymentController::class, 'getConcessionProducts']);
 Route::get('/payment-methods/{method}/providers', [PaymentController::class, 'getMethodProviders']);
 Route::match(['get', 'post'], '/payment/success', [PaymentController::class, 'success'])->name('api.payment.success');
 Route::match(['get', 'post'], '/payment/failure', [PaymentController::class, 'failure'])->name('api.payment.failure');
@@ -52,6 +53,7 @@ Route::post('/webhooks/payment/{hash}', [PaymentController::class, 'webhook'])->
 // If auth is present, use authenticated user. If not, use guest checkout
 Route::post('/payment-process', [PaymentController::class, 'processPayment']);
 Route::post('/payment-process-batch', [PaymentController::class, 'processBatchPayment']);
+Route::post('/payment-pricing-preview', [PaymentController::class, 'pricingPreview']);
 Route::post('/payment-process-qr', [PaymentController::class, 'processQrPayment']);
 Route::post('/payment-process-terminal', [PaymentController::class, 'processTerminalPayment']);
 Route::get('/payment-status/{paymentTicketId}', [PaymentController::class, 'status']);

@@ -4,6 +4,7 @@ namespace App\Actions\Payments;
 
 use App\Models\Order;
 use App\Models\Screening;
+use App\Services\OrderItemPricingService;
 use App\Services\SeatInventoryService;
 use App\Services\PaymentProviders\PaymentProviderManager;
 use Illuminate\Http\Request;
@@ -32,13 +33,16 @@ class StartOrderPaymentAction
 {
     protected PaymentProviderManager $paymentManager;
     protected SeatInventoryService $inventoryService;
+    protected OrderItemPricingService $orderItemPricingService;
 
     public function __construct(
         PaymentProviderManager $paymentManager,
-        SeatInventoryService $inventoryService
+        SeatInventoryService $inventoryService,
+        OrderItemPricingService $orderItemPricingService
     ) {
         $this->paymentManager = $paymentManager;
         $this->inventoryService = $inventoryService;
+        $this->orderItemPricingService = $orderItemPricingService;
     }
 
     /**
@@ -79,8 +83,19 @@ class StartOrderPaymentAction
                 'is_batch' => $isBatch,
             ]);
 
-            // Step 2: Crear Order (cabecera)
-            $totalPrice = count($seatIds) * $screening->price;
+            $promotionCode = trim((string) ($validated['promotion_code'] ?? ($validated['additional_data']['promotion_code'] ?? '')));
+            $selectedProducts = $validated['products'] ?? ($validated['additional_data']['products'] ?? []);
+
+            // Step 2: Calcular ítems y crear Order (cabecera)
+            $pricing = $this->orderItemPricingService->calculatePricedItems($screening, $seatIds, [
+                'promotion_code' => $promotionCode,
+                'customer_email' => $validated['customer_email'] ?? null,
+                'products' => is_array($selectedProducts) ? $selectedProducts : [],
+                'screening_id' => (int) $screening->id,
+                'room_id' => (int) $screening->room_id,
+                'cinema_id' => (int) ($screening->room?->cinema_id ?? 0),
+            ]);
+            $totalPrice = (float) $pricing['total_amount'];
             
             $order = Order::create([
                 'uuid' => Str::uuid(),
@@ -102,6 +117,8 @@ class StartOrderPaymentAction
                 'order_id' => $order->id,
                 'order_number' => $order->order_number,
             ]);
+
+            $this->orderItemPricingService->syncSeatItems($order, $pricing['items']);
 
             // Step 3: Asegurar que existen screening_seats en inventory
             try {
@@ -142,8 +159,15 @@ class StartOrderPaymentAction
             // Step 5: Iniciar pago vinculado a Order (sin crear tickets)
             $additionalData = [
                 'total_price' => $totalPrice,
+                'base_subtotal' => $pricing['base_subtotal'] ?? $totalPrice,
+                'seat_subtotal' => $pricing['seat_subtotal'] ?? 0,
+                'product_subtotal' => $pricing['product_subtotal'] ?? 0,
+                'total_discount' => $pricing['total_discount'] ?? 0,
+                'applied_promotions' => $pricing['applied_promotions'] ?? [],
                 'seat_count' => count($seatIds),
                 'seat_ids' => $seatIds,
+                'products' => is_array($selectedProducts) ? $selectedProducts : [],
+                'order_items' => $pricing['items'],
             ];
 
             try {

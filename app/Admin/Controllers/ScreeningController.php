@@ -4,12 +4,15 @@ namespace App\Admin\Controllers;
 
 use App\Models\Screening;
 use App\Models\Movie;
+use App\Models\Promotion;
 use App\Models\Room;
 use App\Models\Seat;
 use App\Models\Order;
 use App\Models\ScreeningSeat;
 use App\Admin\Actions\Screenings\SyncSeats;
 use App\Admin\Actions\Screenings\BatchSyncSeats;
+use App\Admin\Actions\Screenings\AssignAutoTwoByOne;
+use App\Admin\Actions\Screenings\RemoveAutoTwoByOne;
 use App\Services\ScreeningImportExportService;
 use App\Services\SeatInventoryService;
 use App\Services\OrderNumberGenerator;
@@ -18,6 +21,7 @@ use OpenAdmin\Admin\Form;
 use OpenAdmin\Admin\Grid;
 use OpenAdmin\Admin\Show;
 use Illuminate\Http\Request;
+use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
@@ -80,6 +84,8 @@ class ScreeningController extends AdminController
 
         $grid->actions(function ($actions) {
             $actions->add(new SyncSeats());
+            $actions->add(new AssignAutoTwoByOne());
+            $actions->add(new RemoveAutoTwoByOne());
         });
 
         return $grid;
@@ -349,6 +355,82 @@ class ScreeningController extends AdminController
         });
 
         return $form;
+    }
+
+    /**
+     * Asigna/actualiza una promoción automática 2x1 específica para la función.
+     */
+    public function assignAutoTwoByOne(Screening $screening): RedirectResponse
+    {
+        try {
+            $code = 'AUTO2X1-S' . $screening->id;
+            $name = '2x1 Automático - Función #' . $screening->id;
+
+            Promotion::updateOrCreate(
+                ['code' => $code],
+                [
+                    'name' => $name,
+                    'type' => Promotion::TYPE_BXGY,
+                    'description' => 'Promoción automática 2x1 asignada desde el grid de funciones.',
+                    'is_active' => true,
+                    'is_automatic' => true,
+                    'is_stackable' => false,
+                    'priority' => 10,
+                    'starts_at' => now(),
+                    'ends_at' => null,
+                    'settings' => [
+                        'buy_qty' => 2,
+                        'pay_qty' => 1,
+                        'target_item_type' => 'ticket_seat',
+                        'screening_ids' => [$screening->id],
+                    ],
+                ]
+            );
+
+            admin_success('Promociones', "2x1 automático asignado a la función #{$screening->id}.");
+        } catch (\Throwable $e) {
+            Log::error('Error assigning auto 2x1 promotion to screening', [
+                'screening_id' => $screening->id,
+                'error' => $e->getMessage(),
+            ]);
+            admin_error('Promociones', 'No se pudo asignar el 2x1 automático: ' . $e->getMessage());
+        }
+
+        return redirect()->back();
+    }
+
+    /**
+     * Desactiva la promoción automática 2x1 específica para la función.
+     */
+    public function removeAutoTwoByOne(Screening $screening): RedirectResponse
+    {
+        try {
+            $code = 'AUTO2X1-S' . $screening->id;
+
+            $promotion = Promotion::query()
+                ->where('code', $code)
+                ->first();
+
+            if (!$promotion) {
+                admin_warning('Promociones', "No existe 2x1 automático para la función #{$screening->id}.");
+                return redirect()->back();
+            }
+
+            $promotion->update([
+                'is_active' => false,
+                'is_automatic' => false,
+            ]);
+
+            admin_success('Promociones', "2x1 automático desactivado para la función #{$screening->id}.");
+        } catch (\Throwable $e) {
+            Log::error('Error removing auto 2x1 promotion from screening', [
+                'screening_id' => $screening->id,
+                'error' => $e->getMessage(),
+            ]);
+            admin_error('Promociones', 'No se pudo quitar el 2x1 automático: ' . $e->getMessage());
+        }
+
+        return redirect()->back();
     }
 
     public function store()

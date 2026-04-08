@@ -328,6 +328,7 @@ class TicketController extends Controller
                     'id' => $detail->id,
                     'seat_code' => $detail->seat_code,
                     'room_non_number' => (bool) ($detail->room_non_number ?? false),
+                    'non_number' => (bool) ($detail->room_non_number ?? false),
                     'qr_code' => $detail->qr_code,
                 ];
             }
@@ -369,6 +370,7 @@ class TicketController extends Controller
                     'row_number' => $detail->row_number,
                     'seat_code' => $detail->seat_code,
                     'room_non_number' => (bool) ($detail->room_non_number ?? false),
+                    'non_number' => (bool) ($detail->room_non_number ?? false),
                     'price' => $detail->price,
                     'status' => $detail->status,
                     'qr_code' => $detail->qr_code,
@@ -427,6 +429,7 @@ class TicketController extends Controller
                     'row_number' => $detail->row_number,
                     'seat_number' => $detail->seat_number,
                     'room_non_number' => (bool) ($detail->room_non_number ?? false),
+                    'non_number' => (bool) ($detail->room_non_number ?? false),
                     'price' => number_format($detail->price, 2, ',', '.'),
                     'qr_code' => $detail->qr_code,
                 ];

@@ -15,6 +15,7 @@ use App\Actions\Orders\ExpireOrdersAction;
 use App\Enums\PaymentStatus;
 use App\Services\PaymentProviders\PaymentProviderManager;
 use App\Services\PaymentMethods\PaymentMethodService;
+use App\Services\OrderItemPricingService;
 use App\Services\OrderNumberGenerator;
 use App\Services\OrderFinalizationService;
 use App\Services\SeatInventoryService;
@@ -34,6 +35,7 @@ class PaymentController extends Controller
     protected CancelOrderPaymentAction $cancelOrderPayment;
     protected ExpireOrdersAction $expireOrders;
     protected SeatInventoryService $inventoryService;
+    protected OrderItemPricingService $orderItemPricingService;
 
     public function __construct(
         PaymentProviderManager $paymentManager,
@@ -41,7 +43,8 @@ class PaymentController extends Controller
         FinalizeOrderPaymentAction $finalizeOrderPayment,
         CancelOrderPaymentAction $cancelOrderPayment,
         ExpireOrdersAction $expireOrders,
-        SeatInventoryService $inventoryService
+        SeatInventoryService $inventoryService,
+        OrderItemPricingService $orderItemPricingService
     ) {
         $this->paymentManager = $paymentManager;
         $this->startOrderPayment = $startOrderPayment;
@@ -49,6 +52,7 @@ class PaymentController extends Controller
         $this->cancelOrderPayment = $cancelOrderPayment;
         $this->expireOrders = $expireOrders;
         $this->inventoryService = $inventoryService;
+        $this->orderItemPricingService = $orderItemPricingService;
     }
 
     public function index(): JsonResponse
@@ -86,6 +90,26 @@ class PaymentController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Obtener catálogo de productos adicionales (candy bar).
+     */
+    public function getConcessionProducts(): JsonResponse
+    {
+        try {
+            return response()->json([
+                'success' => true,
+                'products' => $this->orderItemPricingService->getAvailableProducts(),
+            ]);
+        } catch (\Exception $e) {
+            Log::error('getConcessionProducts error', ['error' => $e->getMessage()]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudo obtener el catálogo de productos',
             ], 500);
         }
     }
@@ -144,6 +168,74 @@ class PaymentController extends Controller
     }
 
     /**
+     * Previsualiza pricing (subtotal, descuentos automáticos y total) para asientos seleccionados.
+     * No crea orden ni reserva asientos.
+     */
+    public function pricingPreview(Request $request): JsonResponse
+    {
+        try {
+            $validated = $request->validate([
+                'screening_id' => 'required|exists:screenings,id',
+                'seat_ids' => 'required|array|min:1',
+                'seat_ids.*' => 'required|exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
+                'promotion_code' => 'nullable|string|max:80',
+                'additional_data' => 'array',
+                'additional_data.products' => 'nullable|array',
+                'additional_data.products.*.code' => 'required|string|max:120',
+                'additional_data.products.*.quantity' => 'required|integer|min:1|max:20',
+                'additional_data.promotion_code' => 'nullable|string|max:80',
+            ]);
+
+            $screening = Screening::with('room.cinema')->findOrFail((int) $validated['screening_id']);
+            $seatIds = array_values(array_unique(array_map('intval', $validated['seat_ids'] ?? [])));
+            $promotionCode = trim((string) (
+                $validated['promotion_code']
+                ?? ($validated['additional_data']['promotion_code'] ?? '')
+            ));
+            $selectedProducts = $this->extractProductsFromValidatedPayload($validated);
+
+            $pricing = $this->orderItemPricingService->calculatePricedItems($screening, $seatIds, [
+                'promotion_code' => $promotionCode,
+                'customer_email' => $request->input('customer_email'),
+                'user_id' => auth()->id(),
+                'products' => $selectedProducts,
+                'screening_id' => (int) $screening->id,
+                'room_id' => (int) $screening->room_id,
+                'cinema_id' => (int) ($screening->room?->cinema_id ?? 0),
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'screening_id' => (int) $screening->id,
+                'seat_ids' => $seatIds,
+                'seat_count' => count($seatIds),
+                'base_subtotal' => (float) ($pricing['base_subtotal'] ?? 0),
+                'seat_subtotal' => (float) ($pricing['seat_subtotal'] ?? 0),
+                'product_subtotal' => (float) ($pricing['product_subtotal'] ?? 0),
+                'total_discount' => (float) ($pricing['total_discount'] ?? 0),
+                'total_price' => (float) ($pricing['total_amount'] ?? 0),
+                'applied_promotions' => $pricing['applied_promotions'] ?? [],
+                'products' => $selectedProducts,
+                'order_items' => $pricing['items'] ?? [],
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        } catch (\Exception $e) {
+            Log::error('pricingPreview error', ['error' => $e->getMessage()]);
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudo calcular el precio en este momento',
+            ], 500);
+        }
+    }
+
+    /**
      * Procesar pago batch (múltiples asientos)
      * ORDER-FIRST: Crea orden si no hay activa, reutiliza si existe con mismo idempotency_key
      * 
@@ -157,16 +249,24 @@ class PaymentController extends Controller
                 'screening_id' => 'required|exists:screenings,id',
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'required|exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
                 'order_number' => 'nullable|string|max:50',
                 'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'nullable|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
+                'promotion_code' => 'nullable|string|max:80',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
                 'additional_data.order_number' => 'nullable|string|max:50',
                 'additional_data.payment_method' => 'nullable|string|in:redirect,qr,terminal',
+                'additional_data.promotion_code' => 'nullable|string|max:80',
+                'additional_data.products' => 'nullable|array',
+                'additional_data.products.*.code' => 'required|string|max:120',
+                'additional_data.products.*.quantity' => 'required|integer|min:1|max:20',
             ]);
 
             // Detectar payment_method desde additional_data
@@ -198,16 +298,24 @@ class PaymentController extends Controller
             $validated = $request->validate([
                 'screening_id' => 'required|exists:screenings,id',
                 'seat_id' => 'required|exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
                 'order_number' => 'nullable|string|max:50',
                 'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'required|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
+                'promotion_code' => 'nullable|string|max:80',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
                 'additional_data.order_number' => 'nullable|string|max:50',
                 'additional_data.payment_method' => 'nullable|string|in:redirect,qr,terminal',
+                'additional_data.promotion_code' => 'nullable|string|max:80',
+                'additional_data.products' => 'nullable|array',
+                'additional_data.products.*.code' => 'required|string|max:120',
+                'additional_data.products.*.quantity' => 'required|integer|min:1|max:20',
             ]);
 
             // Detectar payment_method desde additional_data
@@ -255,6 +363,8 @@ class PaymentController extends Controller
                 $additionalData = $validated['additional_data'] ?? [];
                 $idempotencyKey = $validated['idempotency_key'] ?? ($additionalData['idempotency_key'] ?? null);
                 $requestedOrderNumber = $validated['order_number'] ?? ($additionalData['order_number'] ?? null);
+                $promotionCode = trim((string) ($validated['promotion_code'] ?? ($additionalData['promotion_code'] ?? '')));
+                $selectedProducts = $this->extractProductsFromValidatedPayload($validated);
                 $customerEmail = $validated['customer_email'];
                 $currentUserId = auth()->id();
                 
@@ -262,6 +372,7 @@ class PaymentController extends Controller
                     'requested_order_number' => $requestedOrderNumber,
                     'idempotency_key' => $idempotencyKey,
                     'payload_method' => $paymentMethod,
+                    'promotion_code' => $promotionCode !== '' ? $promotionCode : null,
                     'seat_count' => count($seatIds),
                     'customer_email' => $customerEmail,
                 ]);
@@ -341,7 +452,16 @@ class PaymentController extends Controller
                 }
 
                 // PASO 2: Reutilizar orden o crear nueva
-                $totalPrice = count($seatIds) * $screening->price;
+                $pricing = $this->orderItemPricingService->calculatePricedItems($screening, $seatIds, [
+                    'promotion_code' => $promotionCode,
+                    'customer_email' => $customerEmail,
+                    'user_id' => $currentUserId,
+                    'products' => $selectedProducts,
+                    'screening_id' => (int) $screening->id,
+                    'room_id' => (int) $screening->room_id,
+                    'cinema_id' => (int) ($screening->room?->cinema_id ?? 0),
+                ]);
+                $totalPrice = (float) $pricing['total_amount'];
                 $isReusedOrder = false;
                 
                 if ($activeOrder) {
@@ -389,6 +509,9 @@ class PaymentController extends Controller
                         'order_number' => $order->order_number,
                     ]);
                 }
+
+                // Mantener desglose de cálculo en order_items (ticket_seat)
+                $this->orderItemPricingService->syncSeatItems($order, $pricing['items']);
 
                 // PASO 3: Garantizar inventario y reservar asientos para la orden
                 $this->inventoryService->ensureScreeningSeats($screening->id);
@@ -449,8 +572,15 @@ class PaymentController extends Controller
 
                 // PASO 5: Preparar additional_data con idempotency_key e info de pago
                 $additionalData['total_price'] = $totalPrice;
+                $additionalData['base_subtotal'] = $pricing['base_subtotal'] ?? $totalPrice;
+                $additionalData['seat_subtotal'] = $pricing['seat_subtotal'] ?? 0;
+                $additionalData['product_subtotal'] = $pricing['product_subtotal'] ?? 0;
+                $additionalData['total_discount'] = $pricing['total_discount'] ?? 0;
+                $additionalData['applied_promotions'] = $pricing['applied_promotions'] ?? [];
                 $additionalData['seat_count'] = count($seatIds);
                 $additionalData['seat_ids'] = $seatIds;
+                $additionalData['products'] = $selectedProducts;
+                $additionalData['order_items'] = $pricing['items'];
                 $additionalData['payment_method'] = $paymentMethod ?? 'redirect';
                 $additionalData['order_number'] = $order->order_number;
                 
@@ -502,6 +632,12 @@ class PaymentController extends Controller
                     'order_number' => $order->order_number,
                     'seats_count' => count($seatIds),
                     'total_price' => $totalPrice,
+                    'base_subtotal' => $pricing['base_subtotal'] ?? $totalPrice,
+                    'seat_subtotal' => $pricing['seat_subtotal'] ?? 0,
+                    'product_subtotal' => $pricing['product_subtotal'] ?? 0,
+                    'total_discount' => $pricing['total_discount'] ?? 0,
+                    'applied_promotions' => $pricing['applied_promotions'] ?? [],
+                    'products' => $selectedProducts,
                     'reserved_until' => $order->reserved_until->toIso8601String(),
                     'expires_in_minutes' => 6,
                     'transaction_id' => $paymentResult['transaction_id'] ?? null,
@@ -706,6 +842,9 @@ class PaymentController extends Controller
                 ->with([
                     'screening.movie',
                     'screening.room.cinema',
+                    'orderItems' => function ($query) {
+                        $query->orderBy('id');
+                    },
                     'tickets' => function ($query) {
                         $query->with('details')->orderBy('id');
                     },
@@ -758,12 +897,27 @@ class PaymentController extends Controller
                             'row_number' => $detail->row_number,
                             'seat_number' => $detail->seat_number,
                             'room_non_number' => (bool) ($detail->room_non_number ?? false),
+                            'non_number' => (bool) ($detail->room_non_number ?? false),
                             'price' => $detail->price,
                             'status' => $detail->status,
                             'qr_code' => $detail->qr_code,
                             'used_at' => $detail->used_at?->toIso8601String(),
                         ];
                     })->values(),
+                ];
+            });
+
+            $orderItems = $order->orderItems->map(function ($item) {
+                return [
+                    'id' => $item->id,
+                    'item_type' => $item->item_type,
+                    'item_code' => $item->item_code,
+                    'description' => $item->description,
+                    'quantity' => $item->quantity,
+                    'unit_price' => $item->unit_price,
+                    'subtotal' => $item->subtotal,
+                    'currency' => $item->currency,
+                    'metadata' => $item->metadata,
                 ];
             });
 
@@ -796,6 +950,7 @@ class PaymentController extends Controller
                         'room' => [
                             'id' => $order->screening?->room?->id,
                             'name' => $order->screening?->room?->name,
+                            'non_number' => (bool) ($order->screening?->room?->non_number ?? false),
                             'cinema' => [
                                 'id' => $order->screening?->room?->cinema?->id,
                                 'name' => $order->screening?->room?->cinema?->name,
@@ -805,6 +960,8 @@ class PaymentController extends Controller
                 ],
                 'payments' => $payments->values(),
                 'payments_count' => $payments->count(),
+                'order_items' => $orderItems->values(),
+                'order_items_count' => $orderItems->count(),
                 'tickets' => $tickets->values(),
                 'tickets_count' => $tickets->count(),
             ]);
@@ -841,15 +998,23 @@ class PaymentController extends Controller
                 'screening_id' => 'required|exists:screenings,id',
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
                 'order_number' => 'nullable|string|max:50',
                 'idempotency_key' => 'nullable|string|uuid',
                 'customer_email' => 'required|email',
                 'customer_name' => 'nullable|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
+                'promotion_code' => 'nullable|string|max:80',
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
                 'additional_data.order_number' => 'nullable|string|max:50',
+                'additional_data.promotion_code' => 'nullable|string|max:80',
+                'additional_data.products' => 'nullable|array',
+                'additional_data.products.*.code' => 'required|string|max:120',
+                'additional_data.products.*.quantity' => 'required|integer|min:1|max:20',
             ]);
 
             $validated['additional_data'] = $validated['additional_data'] ?? [];
@@ -887,6 +1052,9 @@ class PaymentController extends Controller
                 'screening_id' => 'required|exists:screenings,id',
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
                 'payment_provider_id' => 'required|exists:payment_providers,id',
                 'order_number' => 'nullable|string|max:50',
                 'idempotency_key' => 'nullable|string|uuid',
@@ -896,7 +1064,12 @@ class PaymentController extends Controller
                 'additional_data' => 'array',
                 'additional_data.idempotency_key' => 'nullable|string|uuid',
                 'additional_data.order_number' => 'nullable|string|max:50',
+                'additional_data.promotion_code' => 'nullable|string|max:80',
+                'additional_data.products' => 'nullable|array',
+                'additional_data.products.*.code' => 'required|string|max:120',
+                'additional_data.products.*.quantity' => 'required|integer|min:1|max:20',
                 'terminal_id' => 'nullable|string|max:50',
+                'promotion_code' => 'nullable|string|max:80',
             ]);
 
             $validated['additional_data'] = $validated['additional_data'] ?? [];
@@ -1653,5 +1826,20 @@ class PaymentController extends Controller
     public function pending(Request $request): RedirectResponse
     {
         return redirect('/checkout?payment=pending&id=' . ($request->input('external_reference') ?? ''));
+    }
+
+    /**
+     * @param array<string,mixed> $validated
+     * @return array<int,array{code:string,quantity:int}>
+     */
+    private function extractProductsFromValidatedPayload(array $validated): array
+    {
+        $products = $validated['products'] ?? ($validated['additional_data']['products'] ?? []);
+
+        if (!is_array($products)) {
+            return [];
+        }
+
+        return $products;
     }
 }

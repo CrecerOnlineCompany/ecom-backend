@@ -37,15 +37,18 @@ class ManualOrderService
 {
     private OrderNumberGenerator $orderNumberGenerator;
     private SeatInventoryService $seatInventoryService;
+    private OrderItemPricingService $orderItemPricingService;
     private ?bool $hasTicketSequenceColumn = null;
 
     public function __construct(
         OrderNumberGenerator $orderNumberGenerator,
-        SeatInventoryService $seatInventoryService
+        SeatInventoryService $seatInventoryService,
+        OrderItemPricingService $orderItemPricingService
     )
     {
         $this->orderNumberGenerator = $orderNumberGenerator;
         $this->seatInventoryService = $seatInventoryService;
+        $this->orderItemPricingService = $orderItemPricingService;
     }
 
     /**
@@ -156,24 +159,11 @@ class ManualOrderService
                 ];
             }
 
-            // Step 5: Calculate totals with per-seat modifiers (same rule as API availableSeats)
+            // Step 5: Calculate totals from itemized seat pricing
+            $pricing = $this->orderItemPricingService->calculateSeatItems($screening, $seatIds);
             $basePrice = (float) $screening->price;
-            $seatPrices = [];
-            $totalAmount = 0.0;
-
-            foreach ($seatIds as $seatId) {
-                $seat = $seats->get($seatId);
-                $modifier = (float) ($seat?->price_modifier ?? 1.0);
-                if ($modifier <= 0) {
-                    $modifier = 1.0;
-                }
-
-                $seatPrice = round($basePrice * $modifier, 2);
-                $seatPrices[$seatId] = $seatPrice;
-                $totalAmount += $seatPrice;
-            }
-
-            $totalAmount = round($totalAmount, 2);
+            $seatPrices = $pricing['seat_prices'];
+            $totalAmount = (float) $pricing['total_amount'];
 
             // Step 6: Create order within transaction
             DB::beginTransaction();
@@ -199,6 +189,8 @@ class ManualOrderService
                     'order_number' => $order->order_number,
                     'seat_count' => count($seatIds),
                 ]);
+
+                $this->orderItemPricingService->syncSeatItems($order, $pricing['items']);
 
                 // Step 7: Create tickets and details
                 $finalizedTickets = [];

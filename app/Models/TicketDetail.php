@@ -30,6 +30,15 @@ class TicketDetail extends Model
         'used_at' => 'datetime',
     ];
 
+    protected $appends = [
+        'non_number',
+    ];
+
+    public function getNonNumberAttribute(): bool
+    {
+        return (bool) ($this->room_non_number ?? false);
+    }
+
     public function ticket(): BelongsTo
     {
         return $this->belongsTo(Ticket::class);

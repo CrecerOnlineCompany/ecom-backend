@@ -105,6 +105,14 @@ class Order extends Model
     }
 
     /**
+     * Relación: Order tiene muchos ítems (entradas, combos, etc)
+     */
+    public function orderItems(): HasMany
+    {
+        return $this->hasMany(OrderItem::class);
+    }
+
+    /**
      * Relación: Order tiene muchos ScreeningSeat (asientos reservados/vendidos)
      */
     public function screeningSeats(): HasMany

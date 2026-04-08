@@ -130,6 +130,13 @@ $menuModel::create([
             'parent_id' => $ticketMenu->id,
             'order' => 2,
         ]);
+        $menuModel::create([
+            'title' => 'Promociones',
+            'icon' => 'fa-tags',
+            'uri' => 'promotions',
+            'parent_id' => $ticketMenu->id,
+            'order' => 3,
+        ]);
         $this->command->info('Admin menus seeded successfully.');
     }
 }

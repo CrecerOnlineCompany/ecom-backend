@@ -45,6 +45,12 @@ use Illuminate\Support\Facades\Schema;
 class OrderFinalizationService
 {
     private ?bool $hasTicketSequenceColumn = null;
+    private OrderItemPricingService $orderItemPricingService;
+
+    public function __construct(OrderItemPricingService $orderItemPricingService)
+    {
+        $this->orderItemPricingService = $orderItemPricingService;
+    }
 
     /**
      * Valida que la orden tenga pago aprobado y monto compatible con el total esperado.
@@ -685,6 +691,10 @@ class OrderFinalizationService
 
             $createdCount = 0;
             $sequence = 1;
+            $seatPriceMap = $this->orderItemPricingService->getSeatPriceMapForOrder($order);
+            $fallbackPrice = $reservedSeats->count() > 0
+                ? round((float) $order->total_amount / $reservedSeats->count(), 2)
+                : (float) $order->total_amount;
 
             // Create one ticket per reserved seat (consistent with StartOrderPaymentAction)
             foreach ($reservedSeats as $screeningSeat) {
@@ -696,7 +706,7 @@ class OrderFinalizationService
                     'user_id' => $order->user_id,
                     'order_id' => $order->id,
                     'status' => PaymentStatus::STATUS_PENDING,  // Will be confirmed in finalization
-                    'price' => $order->total_amount / $reservedSeats->count(),
+                    'price' => $seatPriceMap[$screeningSeat->seat_id] ?? $fallbackPrice,
                     'customer_email' => $order->customer_email,
                     'customer_name' => $order->customer_name,
                     'customer_phone' => $order->customer_phone,

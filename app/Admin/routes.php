@@ -30,6 +30,10 @@ Route::group([
 
     // Screenings
     $router->resource('screenings', 'ScreeningController');
+    $router->get('screenings/{screening}/assign-auto-2x1', 'ScreeningController@assignAutoTwoByOne')
+        ->name('screenings.assign-auto-2x1');
+    $router->get('screenings/{screening}/remove-auto-2x1', 'ScreeningController@removeAutoTwoByOne')
+        ->name('screenings.remove-auto-2x1');
     $router->post('screenings/movie-rooms-options', 'ScreeningController@movieRoomsOptions')->name('screenings.movie-rooms.options');
     $router->post('screenings/room-seats-options', 'ScreeningController@roomSeatsOptions')->name('screenings.room-seats.options');
     $router->get('screenings/export/excel', 'ScreeningController@exportExcel')->name('screenings.export.excel');
@@ -77,5 +81,8 @@ Route::group([
     $router->post('payment-providers/mp-create-pos', 'PaymentProviderController@createMercadoPagoPos')->name('payment-providers.mp-create-pos');
     $router->patch('payment-providers/mp-update-operation-mode', 'PaymentProviderController@updateMercadoPagoOperationMode')->name('payment-providers.mp-update-operation-mode');
     $router->post('payment-providers/mp-update-operation-mode', 'PaymentProviderController@updateMercadoPagoOperationMode');
+
+    // Promotions
+    $router->resource('promotions', 'PromotionController');
 
 });

@@ -21,6 +21,7 @@ class OrderController extends Controller
         try {
             $order = Order::where('order_number', $orderNumber)
                 ->with([
+                    'orderItems',
                     'tickets' => function ($query) {
                         $query->with(['details.seat', 'screening.movie', 'screening.room.cinema']);
                     },
@@ -51,6 +52,7 @@ class OrderController extends Controller
                     'row_number' => $detail->row_number,
                     'seat_number' => $detail->seat_number,
                     'room_non_number' => (bool) ($detail->room_non_number ?? false),
+                    'non_number' => (bool) ($detail->room_non_number ?? false),
                     'status' => $detail->status,
                     'price' => $detail->price,
                 ]),
@@ -76,6 +78,17 @@ class OrderController extends Controller
                     'purchased_at' => $order->created_at->format('Y-m-d H:i:s'),
                     'paid_at' => $order->paid_at?->format('Y-m-d H:i:s'),
                 ],
+                'order_items' => $order->orderItems->map(fn ($item) => [
+                    'id' => $item->id,
+                    'item_type' => $item->item_type,
+                    'item_code' => $item->item_code,
+                    'description' => $item->description,
+                    'quantity' => $item->quantity,
+                    'unit_price' => $item->unit_price,
+                    'subtotal' => $item->subtotal,
+                    'currency' => $item->currency,
+                    'metadata' => $item->metadata,
+                ])->values(),
                 'tickets' => $tickets,
                 'tickets_count' => $tickets->count(),
             ]);
@@ -188,6 +201,7 @@ class OrderController extends Controller
         try {
             $order = Order::where('uuid', $uuid)
                 ->with([
+                    'orderItems',
                     'tickets' => function ($query) {
                         $query->with(['details.seat', 'screening.movie', 'screening.room.cinema']);
                     },
@@ -221,6 +235,17 @@ class OrderController extends Controller
                     'customer_name' => $order->customer_name,
                     'customer_email' => $order->customer_email,
                 ],
+                'order_items' => $order->orderItems->map(fn ($item) => [
+                    'id' => $item->id,
+                    'item_type' => $item->item_type,
+                    'item_code' => $item->item_code,
+                    'description' => $item->description,
+                    'quantity' => $item->quantity,
+                    'unit_price' => $item->unit_price,
+                    'subtotal' => $item->subtotal,
+                    'currency' => $item->currency,
+                    'metadata' => $item->metadata,
+                ])->values(),
                 'tickets' => $tickets,
             ]);
 

@@ -5,6 +5,7 @@ namespace Tests\Unit\Services;
 use App\Enums\PaymentStatus;
 use App\Models\Movie;
 use App\Models\Order;
+use App\Models\OrderItem;
 use App\Models\Room;
 use App\Models\Screening;
 use App\Models\ScreeningSeat;
@@ -84,6 +85,13 @@ class ManualOrderServiceTest extends TestCase
         $order = Order::findOrFail($result['order_id']);
         $this->assertEquals(PaymentStatus::STATUS_COMPLETED, $order->status);
         $this->assertEquals(350.00, (float) $order->total_amount); // 150 + 100 + 100
+
+        $orderItems = OrderItem::where('order_id', $order->id)
+            ->where('item_type', OrderItem::TYPE_TICKET_SEAT)
+            ->orderBy('id')
+            ->get();
+        $this->assertCount(3, $orderItems);
+        $this->assertEquals(350.00, (float) $orderItems->sum('subtotal'));
 
         $tickets = Ticket::where('order_id', $order->id)
             ->orderBy('seat_id')

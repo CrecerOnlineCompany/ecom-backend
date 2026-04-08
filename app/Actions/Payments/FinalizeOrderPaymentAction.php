@@ -6,6 +6,7 @@ use App\Models\Order;
 use App\Models\PaymentProviderTicket;
 use App\Models\Ticket;
 use App\Models\TicketDetail;
+use App\Services\OrderItemPricingService;
 use App\Services\SeatInventoryService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -29,10 +30,15 @@ use Illuminate\Support\Facades\Log;
 class FinalizeOrderPaymentAction
 {
     protected SeatInventoryService $inventoryService;
+    protected OrderItemPricingService $orderItemPricingService;
 
-    public function __construct(SeatInventoryService $inventoryService)
+    public function __construct(
+        SeatInventoryService $inventoryService,
+        OrderItemPricingService $orderItemPricingService
+    )
     {
         $this->inventoryService = $inventoryService;
+        $this->orderItemPricingService = $orderItemPricingService;
     }
 
     /**
@@ -126,6 +132,11 @@ class FinalizeOrderPaymentAction
 
             // Step 3: Crear 1 Ticket confirmado por cada asiento
             $tickets = [];
+            $seatPriceMap = $this->orderItemPricingService->getSeatPriceMapForOrder($order);
+            $fallbackPrice = count($seatIds) > 0
+                ? round((float) $order->total_amount / count($seatIds), 2)
+                : (float) $order->total_amount;
+
             foreach ($seatIds as $seatId) {
                 $ticket = Ticket::create([
                     'screening_id' => $order->screening_id,
@@ -133,7 +144,7 @@ class FinalizeOrderPaymentAction
                     'user_id' => $order->user_id,
                     'order_id' => $order->id,
                     'ticket_number' => null, // Genera en siguiente paso
-                    'price' => $order->total_amount / count($seatIds), // Distribuir precio
+                    'price' => $seatPriceMap[$seatId] ?? $fallbackPrice,
                     'customer_email' => $order->customer_email,
                     'customer_name' => $order->customer_name,
                     'customer_phone' => $order->customer_phone,

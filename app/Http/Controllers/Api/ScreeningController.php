@@ -112,7 +112,7 @@ class ScreeningController extends Controller
             ])
             ->with([
                 'movie:id,title',
-                'room:id,cinema_id,number',
+                'room:id,cinema_id,number,non_number',
                 'room.cinema:id,name',
             ])
             ->findOrFail($screening->id);
@@ -129,6 +129,7 @@ class ScreeningController extends Controller
             'movie_title' => $screening->movie?->title,
             'cinema_name' => $screening->room?->cinema?->name,
             'room_number' => $screening->room?->number,
+            'non_number' => (bool) ($screening->room?->non_number ?? false),
         ]);
     }
 
@@ -173,6 +174,7 @@ class ScreeningController extends Controller
                 'total_seats' => $screening->room->total_seats,
                 'booked_seats_count' => 0,
                 'available_seats_count' => 0,
+                'non_number' => (bool) ($screening->room?->non_number ?? false),
                 'seats' => [],
             ]);
         }
@@ -193,7 +195,8 @@ class ScreeningController extends Controller
             ->get();
 
         $basePrice = (float) $screening->price;
-        $availableSeats->transform(function ($seat) use ($basePrice) {
+        $roomNonNumber = (bool) ($screening->room?->non_number ?? false);
+        $availableSeats->transform(function ($seat) use ($basePrice, $roomNonNumber) {
             // Compatibilidad: algunos asientos históricos quedaron con modifier=0.
             // En ese caso usamos precio base (modifier=1.0) para evitar price=0.
             $modifier = (float) ($seat->price_modifier ?? 1);
@@ -201,6 +204,7 @@ class ScreeningController extends Controller
                 $modifier = 1.0;
             }
             $seat->price = round($basePrice * $modifier, 2);
+            $seat->non_number = $roomNonNumber;
             return $seat;
         });
 
@@ -209,6 +213,7 @@ class ScreeningController extends Controller
             'total_seats' => $screening->room->total_seats,
             'booked_seats_count' => count($blockedSeatIds),
             'available_seats_count' => $availableSeats->count(),
+            'non_number' => $roomNonNumber,
             'seats' => $availableSeats,
         ]);
     }
