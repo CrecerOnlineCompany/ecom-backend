@@ -60,6 +60,8 @@ Route::group([
     $router->post('orders/manual/api/movies', 'OrderController@apiGetMovies')->name('orders.api.movies');
     $router->post('orders/manual/api/screenings', 'OrderController@apiGetScreenings')->name('orders.api.screenings');
     $router->post('orders/manual/api/seating-chart', 'OrderController@apiGetSeatingChart')->name('orders.api.seating-chart');
+    $router->post('orders/manual/api/products', 'OrderController@apiGetProducts')->name('orders.api.products');
+    $router->post('orders/manual/api/pricing-preview', 'OrderController@apiPricingPreview')->name('orders.api.pricing-preview');
     $router->post('orders/manual/api/store', 'OrderController@apiStoreManualOrder')->name('orders.api.store');
     
     // Rutas personalizadas para editar details desde tickets
@@ -84,5 +86,6 @@ Route::group([
 
     // Promotions
     $router->resource('promotions', 'PromotionController');
+    $router->resource('products', 'ProductController');
 
 });

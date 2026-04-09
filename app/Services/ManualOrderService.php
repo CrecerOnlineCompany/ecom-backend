@@ -66,6 +66,8 @@ class ManualOrderService
      * @param string $customerEmail
      * @param string $customerName
      * @param string|null $customerPhone
+     * @param array<int,array{code:string,quantity:int}> $products
+     * @param string|null $promotionCode
      * @return array ['success', 'message', 'order', 'finalized_tickets']
      */
     public function createManualOrder(
@@ -73,7 +75,9 @@ class ManualOrderService
         array $seatIds,
         string $customerEmail,
         string $customerName,
-        ?string $customerPhone = null
+        ?string $customerPhone = null,
+        array $products = [],
+        ?string $promotionCode = null
     ): array {
         try {
             $seatIds = array_values(array_unique(array_map('intval', $seatIds)));
@@ -159,8 +163,16 @@ class ManualOrderService
                 ];
             }
 
-            // Step 5: Calculate totals from itemized seat pricing
-            $pricing = $this->orderItemPricingService->calculateSeatItems($screening, $seatIds);
+            // Step 5: Calculate totals from itemized pricing (seats + optional products)
+            $pricing = $this->orderItemPricingService->calculatePricedItems($screening, $seatIds, [
+                'products' => $products,
+                'promotion_code' => trim((string) $promotionCode),
+                'customer_email' => $customerEmail,
+                'user_id' => auth()->id(),
+                'screening_id' => (int) $screening->id,
+                'room_id' => (int) $screening->room_id,
+                'cinema_id' => (int) ($screening->room?->cinema_id ?? 0),
+            ]);
             $basePrice = (float) $screening->price;
             $seatPrices = $pricing['seat_prices'];
             $totalAmount = (float) $pricing['total_amount'];

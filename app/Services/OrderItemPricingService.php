@@ -4,9 +4,12 @@ namespace App\Services;
 
 use App\Models\Order;
 use App\Models\OrderItem;
+use App\Models\Product;
 use App\Models\Screening;
 use App\Models\Seat;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 
 class OrderItemPricingService
 {
@@ -202,9 +205,28 @@ class OrderItemPricingService
      */
     public function getAvailableProducts(): array
     {
+        if (Schema::hasTable('products')) {
+            return Product::query()
+                ->where('is_active', true)
+                ->orderBy('sort_order')
+                ->orderBy('name')
+                ->get(['code', 'name', 'image_path', 'type', 'unit_price', 'currency'])
+                ->map(function (Product $product) {
+                    return [
+                        'code' => (string) $product->code,
+                        'name' => (string) $product->name,
+                        'image_url' => $this->resolveImageUrl($product->image_path),
+                        'type' => (string) $product->type,
+                        'unit_price' => round((float) $product->unit_price, 2),
+                        'currency' => (string) ($product->currency ?? 'ARS'),
+                    ];
+                })
+                ->values()
+                ->all();
+        }
+
         $catalog = config('concessions.products', []);
         $result = [];
-
         foreach ($catalog as $code => $product) {
             if (!($product['is_active'] ?? true)) {
                 continue;
@@ -213,6 +235,7 @@ class OrderItemPricingService
             $result[] = [
                 'code' => (string) $code,
                 'name' => (string) ($product['name'] ?? $code),
+                'image_url' => null,
                 'type' => (string) ($product['type'] ?? OrderItem::TYPE_PRODUCT),
                 'unit_price' => round((float) ($product['unit_price'] ?? 0), 2),
                 'currency' => (string) ($product['currency'] ?? 'ARS'),
@@ -272,7 +295,7 @@ class OrderItemPricingService
             ];
         }
 
-        $catalog = config('concessions.products', []);
+        $catalog = $this->resolveProductCatalogByCode($selectedProducts);
         $items = [];
         $totalAmount = 0.0;
 
@@ -285,8 +308,7 @@ class OrderItemPricingService
             }
 
             $catalogItem = $catalog[$code] ?? null;
-            $isActive = (bool) ($catalogItem['is_active'] ?? false);
-            if (!$catalogItem || !$isActive) {
+            if (!$catalogItem) {
                 throw new \InvalidArgumentException("Producto inválido o inactivo: {$code}");
             }
 
@@ -320,5 +342,76 @@ class OrderItemPricingService
             'items' => $items,
             'total_amount' => round($totalAmount, 2),
         ];
+    }
+
+    /**
+     * @param array<int,array{code:string,quantity:int}> $selectedProducts
+     * @return array<string,array<string,mixed>>
+     */
+    private function resolveProductCatalogByCode(array $selectedProducts): array
+    {
+        $codes = array_values(array_unique(array_map(
+            fn (array $selected) => strtoupper(trim((string) ($selected['code'] ?? ''))),
+            $selectedProducts
+        )));
+        $codes = array_values(array_filter($codes));
+
+        if (empty($codes)) {
+            return [];
+        }
+
+        if (Schema::hasTable('products')) {
+            $products = Product::query()
+                ->whereIn('code', $codes)
+                ->where('is_active', true)
+                ->get();
+
+            if ($products->isNotEmpty()) {
+                $catalog = [];
+                foreach ($products as $product) {
+                    $catalog[strtoupper((string) $product->code)] = [
+                        'name' => $product->name,
+                        'type' => $product->type,
+                        'unit_price' => (float) $product->unit_price,
+                        'currency' => $product->currency,
+                        'is_active' => (bool) $product->is_active,
+                    ];
+                }
+
+                return $catalog;
+            }
+        }
+
+        $configCatalog = config('concessions.products', []);
+        $catalog = [];
+        foreach ($codes as $code) {
+            $item = $configCatalog[$code] ?? null;
+            if (!$item || !($item['is_active'] ?? false)) {
+                continue;
+            }
+
+            $catalog[$code] = $item;
+        }
+
+        return $catalog;
+    }
+
+    private function resolveImageUrl(?string $imagePath): ?string
+    {
+        if (!$imagePath) {
+            return null;
+        }
+
+        if (str_starts_with($imagePath, 'http://') || str_starts_with($imagePath, 'https://')) {
+            return $imagePath;
+        }
+
+        $path = ltrim($imagePath, '/');
+
+        try {
+            return Storage::disk('admin')->url($path);
+        } catch (\Throwable $e) {
+            return asset($path);
+        }
     }
 }

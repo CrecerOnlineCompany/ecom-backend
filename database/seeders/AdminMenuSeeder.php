@@ -137,6 +137,13 @@ $menuModel::create([
             'parent_id' => $ticketMenu->id,
             'order' => 3,
         ]);
+        $menuModel::create([
+            'title' => 'Productos',
+            'icon' => 'fa-shopping-bag',
+            'uri' => 'products',
+            'parent_id' => $ticketMenu->id,
+            'order' => 4,
+        ]);
         $this->command->info('Admin menus seeded successfully.');
     }
 }

@@ -52,6 +52,18 @@ class ScreeningController extends AdminController
     protected function grid()
     {
         $grid = new Grid(new Screening());
+        $movieOptions = Movie::query()
+            ->orderBy('title')
+            ->pluck('title', 'id')
+            ->toArray();
+        $roomOptions = Room::query()
+            ->orderBy('name')
+            ->pluck('name', 'id')
+            ->toArray();
+        $cinemaOptions = DB::table('cinemas')
+            ->orderBy('name')
+            ->pluck('name', 'id')
+            ->toArray();
 
         // Eager load relationships to avoid N+1 queries
         $grid->model()->with(['movie','room.cinema']);
@@ -71,6 +83,37 @@ class ScreeningController extends AdminController
         $grid->column('price', __('admin.price'));
         $grid->column('available_seats', __('admin.available_seats'));
         $grid->column('is_active', __('admin.status'))->bool();
+
+        $grid->filter(function ($filter) use ($movieOptions, $roomOptions, $cinemaOptions) {
+            $filter->expand();
+            $filter->disableIdFilter();
+
+            $filter->equal('movie_id', 'Película')->select($movieOptions);
+            $filter->like('movie.title', 'Película (texto)');
+
+            $filter->where(function ($query) {
+                $query->whereHas('room', function ($roomQuery) {
+                    $roomQuery->where('cinema_id', $this->input);
+                });
+            }, 'Cine', 'cinema_id')->select($cinemaOptions);
+
+            $filter->equal('room_id', 'Sala')->select($roomOptions);
+            $filter->between('start_time', 'Rango horario inicio');
+            $filter->between('end_time', 'Rango horario fin');
+            $filter->equal('format', __('admin.format'))->select([
+                '2D' => '2D',
+                '3D' => '3D',
+                'IMAX' => 'IMAX',
+                '4DX' => '4DX',
+            ]);
+            $filter->equal('is_active', __('admin.status'))->radio([
+                '' => 'Todos',
+                1 => 'Activo',
+                0 => 'Inactivo',
+            ]);
+            $filter->between('price', __('admin.price'));
+            $filter->between('available_seats', __('admin.available_seats'));
+        });
 
         // Tools (botones de acción)
         $grid->tools(function ($tools) {

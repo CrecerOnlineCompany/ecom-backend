@@ -77,8 +77,21 @@
                     </div>
 
                     <!-- Step 4: Customer Info -->
+                    <div class="form-section" id="product-selection" style="display: none;">
+                        <h4><span class="step-number">4</span> Productos</h4>
+                        <div id="product_catalog" class="products-grid">
+                            <p style="text-align: center; color: #999;">Cargando productos...</p>
+                        </div>
+                    </div>
+
+                    <!-- Step 5: Customer Info -->
                     <div class="form-section" id="customer-info" style="display: none;">
-                        <h4><span class="step-number">4</span> Información del Cliente</h4>
+                        <h4><span class="step-number">5</span> Información del Cliente</h4>
+
+                        <div class="form-group">
+                            <label for="promotion_code">Código promocional (opcional):</label>
+                            <input type="text" id="promotion_code" class="form-control" placeholder="Ej: PROMO2X1" />
+                        </div>
                         
                         <div class="form-group">
                             <label for="customer_name">Nombre:</label>
@@ -118,6 +131,22 @@
                                 <tr>
                                     <td><strong>Asientos Seleccionados:</strong></td>
                                     <td id="summary_seats">-</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Productos:</strong></td>
+                                    <td id="summary_products">-</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Total Productos:</strong></td>
+                                    <td id="summary_products_total">$0.00</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Descuento:</strong></td>
+                                    <td id="summary_discount">$0.00</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Promociones:</strong></td>
+                                    <td id="summary_promotions">-</td>
                                 </tr>
                                 <tr class="info">
                                     <td><strong>Total:</strong></td>
@@ -282,6 +311,75 @@
     .seat.reserved {
         background-color: #f0ad4e;
     }
+
+    .products-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+        gap: 12px;
+    }
+
+    .product-card {
+        border: 1px solid #ddd;
+        border-radius: 6px;
+        background: #fff;
+        padding: 10px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+    }
+
+    .product-image {
+        width: 64px;
+        height: 64px;
+        object-fit: cover;
+        border-radius: 4px;
+        border: 1px solid #eee;
+        background: #f5f5f5;
+    }
+
+    .product-image-placeholder {
+        width: 64px;
+        height: 64px;
+        border-radius: 4px;
+        border: 1px solid #eee;
+        background: #f5f5f5;
+        color: #999;
+        font-size: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        padding: 4px;
+    }
+
+    .product-info {
+        flex: 1;
+    }
+
+    .product-name {
+        font-weight: 600;
+        margin-bottom: 2px;
+    }
+
+    .product-price {
+        color: #666;
+        margin-bottom: 8px;
+    }
+
+    .product-qty {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+
+    .product-qty .btn {
+        padding: 2px 8px;
+    }
+
+    .product-qty input {
+        width: 56px;
+        text-align: center;
+    }
 </style>
 
 <script>
@@ -298,8 +396,12 @@
             csrfToken: '{{ csrf_token() }}',
             baseUrl: '/admin/orders/manual',
             selectedSeats: new Map(),
+            selectedProducts: new Map(),
+            availableProducts: [],
             currentScreening: null,
             currentMovie: null,
+            pricingRequestSeq: 0,
+            pricingPreviewTimer: null,
 
             async init() {
                 this.loadMovies();
@@ -310,6 +412,7 @@
                 document.getElementById('movie_id').addEventListener('change', () => this.onMovieSelected());
                 document.getElementById('screening_id').addEventListener('change', () => this.onScreeningSelected());
                 document.getElementById('create_order_btn').addEventListener('click', () => this.createOrder());
+                document.getElementById('promotion_code').addEventListener('input', () => this.schedulePricingPreview());
             },
 
         async loadMovies() {
@@ -347,6 +450,7 @@
             if (!movieId) {
                 document.getElementById('screening-selection').style.display = 'none';
                 document.getElementById('seat-selection').style.display = 'none';
+                document.getElementById('product-selection').style.display = 'none';
                 document.getElementById('customer-info').style.display = 'none';
                 document.getElementById('order-summary').style.display = 'none';
                 return;
@@ -354,6 +458,7 @@
 
             this.currentMovie = movieId;
             this.selectedSeats = new Map();
+            this.selectedProducts = new Map();
 
             try {
                 const response = await fetch(`${this.baseUrl}/api/screenings`, {
@@ -395,6 +500,7 @@
             const screeningId = document.getElementById('screening_id').value;
             if (!screeningId) {
                 document.getElementById('seat-selection').style.display = 'none';
+                document.getElementById('product-selection').style.display = 'none';
                 document.getElementById('customer-info').style.display = 'none';
                 document.getElementById('order-summary').style.display = 'none';
                 return;
@@ -402,6 +508,7 @@
 
             this.currentScreening = parseInt(screeningId);
             this.selectedSeats = new Map();
+            this.selectedProducts = new Map();
 
             try {
                 console.log('Fetching seating chart for screening:', screeningId);
@@ -426,7 +533,9 @@
                 if (result.success) {
                     this.renderSeatingChart(result.data);
                     this.updateScreeningInfo(result.data);
+                    await this.loadProducts();
                     document.getElementById('seat-selection').style.display = 'block';
+                    document.getElementById('product-selection').style.display = 'block';
                     document.getElementById('customer-info').style.display = 'block';
                 } else {
                     console.error('API Success false:', result);
@@ -438,11 +547,122 @@
             }
         },
 
-            getRowLabel(rowNum) {
-                const num = Number(rowNum);
-                if (Number.isFinite(num) && num > 0) {
-                    return String.fromCharCode(64 + num);
+            async loadProducts() {
+            const catalog = document.getElementById('product_catalog');
+            catalog.innerHTML = '<p style="text-align: center; color: #999;">Cargando productos...</p>';
+
+            try {
+                const response = await fetch(`${this.baseUrl}/api/products`, {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRF-TOKEN': this.csrfToken,
+                        'Content-Type': 'application/json',
+                    },
+                });
+
+                const result = await response.json();
+                if (!response.ok || !result.success) {
+                    throw new Error(result.message || 'No se pudo cargar el catálogo');
                 }
+
+                this.availableProducts = Array.isArray(result.data) ? result.data : [];
+                this.renderProductCatalog(this.availableProducts);
+            } catch (error) {
+                console.error('Error loading products:', error);
+                catalog.innerHTML = '<p style="text-align: center; color: #999;">No se pudieron cargar los productos.</p>';
+            }
+        },
+
+            renderProductCatalog(products) {
+            const catalog = document.getElementById('product_catalog');
+            if (!Array.isArray(products) || products.length === 0) {
+                catalog.innerHTML = '<p style="text-align: center; color: #999;">No hay productos activos.</p>';
+                this.updateOrderSummary();
+                return;
+            }
+
+            let html = '';
+            products.forEach((product) => {
+                const code = String(product.code || '');
+                const name = String(product.name || code);
+                const imageUrl = product.image_url ? String(product.image_url) : '';
+                const unitPrice = Number(product.unit_price || 0);
+                const qty = this.selectedProducts.get(code)?.quantity || 0;
+                const safeName = name.replace(/"/g, '&quot;');
+
+                html += `
+                    <div class="product-card" data-product-code="${code}" data-product-name="${safeName}" data-product-price="${unitPrice}">
+                        ${imageUrl
+                            ? `<img src="${imageUrl}" alt="${safeName}" class="product-image">`
+                            : '<div class="product-image-placeholder">Sin imagen</div>'}
+                        <div class="product-info">
+                            <div class="product-name">${name}</div>
+                            <div class="product-price">$${unitPrice.toFixed(2)}</div>
+                            <div class="product-qty">
+                                <button type="button" class="btn btn-default btn-xs product-minus">-</button>
+                                <input type="number" class="form-control input-sm product-qty-input" min="0" value="${qty}">
+                                <button type="button" class="btn btn-default btn-xs product-plus">+</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            });
+
+            catalog.innerHTML = html;
+
+            catalog.querySelectorAll('.product-card').forEach((card) => {
+                const code = String(card.dataset.productCode || '');
+                const name = String(card.dataset.productName || code);
+                const unitPrice = Number(card.dataset.productPrice || 0);
+                const input = card.querySelector('.product-qty-input');
+                const minus = card.querySelector('.product-minus');
+                const plus = card.querySelector('.product-plus');
+
+                minus.addEventListener('click', () => {
+                    const next = Math.max(0, Number(input.value || 0) - 1);
+                    input.value = String(next);
+                    this.setProductQuantity(code, name, unitPrice, next);
+                });
+
+                plus.addEventListener('click', () => {
+                    const next = Math.max(0, Number(input.value || 0) + 1);
+                    input.value = String(next);
+                    this.setProductQuantity(code, name, unitPrice, next);
+                });
+
+                input.addEventListener('change', () => {
+                    const next = Math.max(0, Number(input.value || 0));
+                    input.value = String(next);
+                    this.setProductQuantity(code, name, unitPrice, next);
+                });
+            });
+
+            this.updateOrderSummary();
+        },
+
+            setProductQuantity(code, name, unitPrice, quantity) {
+            if (quantity <= 0) {
+                this.selectedProducts.delete(code);
+            } else {
+                this.selectedProducts.set(code, {
+                    code,
+                    name,
+                    unit_price: Number.isFinite(unitPrice) ? unitPrice : 0,
+                    quantity: Number(quantity),
+                });
+            }
+
+            this.updateOrderSummary();
+        },
+
+            getSelectedProductsPayload() {
+            return Array.from(this.selectedProducts.values()).map((item) => ({
+                code: item.code,
+                quantity: Number(item.quantity || 0),
+            })).filter((item) => item.quantity > 0);
+        },
+
+            getRowLabel(rowNum) {
                 return String(rowNum ?? '-');
             },
 
@@ -475,7 +695,8 @@
                         const selectedClass = this.selectedSeats.has(seatId) ? ' selected' : '';
 
                         const seatPrice = Number(seat.price || 0);
-                        html += `<div class="seat ${seatClass}${selectedClass}" data-seat-id="${seatId}" data-seat-code="${seatCode}" data-seat-price="${seatPrice}">${seat.seat_number}</div>`;
+                        const seatLabel = seatCode !== '' ? seatCode : String(seat.seat_number ?? '');
+                        html += `<div class="seat ${seatClass}${selectedClass}" data-seat-id="${seatId}" data-seat-code="${seatLabel}" data-seat-price="${seatPrice}">${seatLabel}</div>`;
                     });
 
                     html += '</div></div>';
@@ -532,12 +753,19 @@
             }
 
             const selectedSeatValues = Array.from(this.selectedSeats.values());
-            const total = selectedSeatValues.reduce((acc, seatData) => {
+            const seatTotal = selectedSeatValues.reduce((acc, seatData) => {
                 if (seatData && typeof seatData === 'object') {
                     return acc + Number(seatData.price || 0);
                 }
                 return acc;
             }, 0);
+            const selectedProducts = Array.from(this.selectedProducts.values());
+            const productsTotal = selectedProducts.reduce((acc, item) => {
+                const price = Number(item.unit_price || 0);
+                const qty = Number(item.quantity || 0);
+                return acc + (price * qty);
+            }, 0);
+            const total = seatTotal + productsTotal;
 
             const seatCodes = selectedSeatValues.map((seatData) => {
                 if (seatData && typeof seatData === 'object') {
@@ -545,17 +773,89 @@
                 }
                 return String(seatData || '');
             });
+            const productLines = selectedProducts.map((item) => `${item.name} x${item.quantity}`);
 
             document.getElementById('summary_seats').textContent = seatCodes.join(', ');
+            document.getElementById('summary_products').textContent = productLines.length > 0 ? productLines.join(', ') : '-';
+            document.getElementById('summary_products_total').textContent = `$${productsTotal.toFixed(2)}`;
+            document.getElementById('summary_discount').textContent = '$0.00';
+            document.getElementById('summary_promotions').textContent = '-';
             document.getElementById('summary_total').textContent = `$${total.toFixed(2)}`;
             document.getElementById('order-summary').style.display = 'block';
             document.getElementById('create_order_btn').style.display = 'inline-block';
+            this.schedulePricingPreview();
+            },
+
+            schedulePricingPreview() {
+                if (this.pricingPreviewTimer) {
+                    clearTimeout(this.pricingPreviewTimer);
+                }
+
+                this.pricingPreviewTimer = setTimeout(() => {
+                    this.pricingPreviewTimer = null;
+                    this.refreshPricingPreview();
+                }, 200);
+            },
+
+            async refreshPricingPreview() {
+                if (!this.currentScreening || this.selectedSeats.size === 0) {
+                    return;
+                }
+
+                const requestSeq = ++this.pricingRequestSeq;
+                const promotionCode = document.getElementById('promotion_code').value.trim();
+                const customerEmail = document.getElementById('customer_email').value.trim();
+
+                try {
+                    const response = await fetch(`${this.baseUrl}/api/pricing-preview`, {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRF-TOKEN': this.csrfToken,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            screening_id: this.currentScreening,
+                            seat_ids: Array.from(this.selectedSeats.keys()),
+                            products: this.getSelectedProductsPayload(),
+                            promotion_code: promotionCode || null,
+                            customer_email: customerEmail || null,
+                        }),
+                    });
+
+                    const result = await response.json();
+                    if (requestSeq !== this.pricingRequestSeq) {
+                        return;
+                    }
+
+                    if (!response.ok || !result.success) {
+                        if (result.message) {
+                            document.getElementById('summary_promotions').textContent = result.message;
+                        }
+                        return;
+                    }
+
+                    const totalDiscount = Number(result.total_discount || 0);
+                    const totalPrice = Number(result.total_price || 0);
+                    const appliedPromotions = Array.isArray(result.applied_promotions) ? result.applied_promotions : [];
+                    const promotionNames = appliedPromotions
+                        .map((promo) => String(promo.name || promo.code || '').trim())
+                        .filter((label) => label !== '');
+
+                    document.getElementById('summary_discount').textContent = `-$${totalDiscount.toFixed(2)}`;
+                    document.getElementById('summary_promotions').textContent = promotionNames.length > 0
+                        ? promotionNames.join(', ')
+                        : '-';
+                    document.getElementById('summary_total').textContent = `$${totalPrice.toFixed(2)}`;
+                } catch (error) {
+                    console.error('Error en pricing preview manual:', error);
+                }
             },
 
             async createOrder() {
             const customerEmail = document.getElementById('customer_email').value.trim();
             const customerName = document.getElementById('customer_name').value.trim();
             const customerPhone = document.getElementById('customer_phone').value.trim();
+            const promotionCode = document.getElementById('promotion_code').value.trim();
 
             if (!customerEmail) {
                 alert('Por favor ingresa el email del cliente');
@@ -586,6 +886,8 @@
                     body: JSON.stringify({
                         screening_id: this.currentScreening,
                         seat_ids: Array.from(this.selectedSeats.keys()),
+                        products: this.getSelectedProductsPayload(),
+                        promotion_code: promotionCode || null,
                         customer_email: customerEmail,
                         customer_name: customerName,
                         customer_phone: customerPhone || null,

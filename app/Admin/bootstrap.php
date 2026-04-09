@@ -19,3 +19,4 @@
  */
 
 OpenAdmin\Admin\Form::forget(['editor']);
+OpenAdmin\Admin\Form::extend('virtualTable', \App\Admin\Extensions\Form\Field\VirtualTable::class);

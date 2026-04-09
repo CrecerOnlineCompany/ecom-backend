@@ -10,6 +10,8 @@ use App\Models\Screening;
 use App\Models\Seat;
 use App\Models\ScreeningSeat;
 use App\Services\ManualOrderService;
+use App\Services\OrderItemPricingService;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\JsonResponse;
@@ -134,7 +136,15 @@ class OrderController extends AdminController
         $show->field('screening.room.cinema.name', 'Cine');
         $show->field('screening.room.name', 'Sala');
         $show->field('screening.start_time', 'Función')->as(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+            if (!$value) {
+                return '-';
+            }
+
+            $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
+
+            return Carbon::parse($value, 'UTC')
+                ->setTimezone($businessTimezone)
+                ->format('d/m/Y H:i:s');
         });
 
         $show->divider();
@@ -279,6 +289,80 @@ class OrderController extends AdminController
     }
 
     /**
+     * API: Obtener productos activos de candy bar
+     */
+    public function apiGetProducts(Request $request): JsonResponse
+    {
+        /** @var OrderItemPricingService $pricingService */
+        $pricingService = app(OrderItemPricingService::class);
+
+        return response()->json([
+            'success' => true,
+            'data' => $pricingService->getAvailableProducts(),
+        ]);
+    }
+
+    /**
+     * API: Previsualizar pricing (descuentos/promociones) para venta manual.
+     */
+    public function apiPricingPreview(Request $request): JsonResponse
+    {
+        try {
+            $validated = $request->validate([
+                'screening_id' => 'required|exists:screenings,id',
+                'seat_ids' => 'required|array|min:1',
+                'seat_ids.*' => 'required|exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
+                'promotion_code' => 'nullable|string|max:80',
+            ]);
+
+            $screening = Screening::with('room.cinema')->findOrFail((int) $validated['screening_id']);
+            $seatIds = array_values(array_unique(array_map('intval', $validated['seat_ids'] ?? [])));
+            $selectedProducts = is_array($validated['products'] ?? null) ? $validated['products'] : [];
+            $promotionCode = trim((string) ($validated['promotion_code'] ?? ''));
+
+            /** @var OrderItemPricingService $pricingService */
+            $pricingService = app(OrderItemPricingService::class);
+            $pricing = $pricingService->calculatePricedItems($screening, $seatIds, [
+                'promotion_code' => $promotionCode,
+                'customer_email' => $request->input('customer_email'),
+                'user_id' => auth()->id(),
+                'products' => $selectedProducts,
+                'screening_id' => (int) $screening->id,
+                'room_id' => (int) $screening->room_id,
+                'cinema_id' => (int) ($screening->room?->cinema_id ?? 0),
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'base_subtotal' => (float) ($pricing['base_subtotal'] ?? 0),
+                'seat_subtotal' => (float) ($pricing['seat_subtotal'] ?? 0),
+                'product_subtotal' => (float) ($pricing['product_subtotal'] ?? 0),
+                'total_discount' => (float) ($pricing['total_discount'] ?? 0),
+                'total_price' => (float) ($pricing['total_amount'] ?? 0),
+                'applied_promotions' => $pricing['applied_promotions'] ?? [],
+            ]);
+        } catch (\InvalidArgumentException $e) {
+            return response()->json([
+                'success' => false,
+                'message' => $e->getMessage(),
+            ], 422);
+        } catch (\Exception $e) {
+            \Log::error('Error en apiPricingPreview (manual)', [
+                'error' => $e->getMessage(),
+                'trace' => $e->getTraceAsString(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudo calcular el precio en este momento',
+            ], 500);
+        }
+    }
+
+    /**
      * API: Obtener screenings de una película
      */
     public function apiGetScreenings(Request $request): JsonResponse
@@ -289,13 +373,19 @@ class OrderController extends AdminController
 
         $screenings = Screening::where('movie_id', $validated['movie_id'])
             ->where('is_active', true)
+            ->where('start_time', '>=', Carbon::now('UTC'))
             ->with('room.cinema')
             ->orderBy('start_time', 'asc')
             ->get()
             ->map(function ($screening) {
+                $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
+
                 return [
                     'id' => $screening->id,
-                    'start_time' => $screening->start_time->format('Y-m-d H:i'),
+                    'start_time' => $screening->start_time
+                        ->copy()
+                        ->setTimezone($businessTimezone)
+                        ->format('Y-m-d H:i'),
                     'price' => (float) $screening->price,
                     'cinema_name' => $screening->room->cinema->name,
                     'room_name' => $screening->room->name,
@@ -364,13 +454,18 @@ class OrderController extends AdminController
                     ->toArray();
             }
 
+            $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
+
             return response()->json([
                 'success' => true,
                 'data' => [
                     'seats' => $seats,
                     'room_name' => $screening->room->name,
                     'cinema_name' => $screening->room->cinema->name ?? 'Sin cine',
-                    'screening_start_time' => $screening->start_time->format('Y-m-d H:i'),
+                    'screening_start_time' => $screening->start_time
+                        ->copy()
+                        ->setTimezone($businessTimezone)
+                        ->format('Y-m-d H:i'),
                     'base_price' => (float) $screening->price,
                 ],
             ]);
@@ -404,6 +499,10 @@ class OrderController extends AdminController
                 'screening_id' => 'required|exists:screenings,id',
                 'seat_ids' => 'required|array|min:1',
                 'seat_ids.*' => 'required|exists:seats,id',
+                'products' => 'nullable|array',
+                'products.*.code' => 'required|string|max:120',
+                'products.*.quantity' => 'required|integer|min:1|max:20',
+                'promotion_code' => 'nullable|string|max:80',
                 'customer_email' => 'required|email',
                 'customer_name' => 'required|string|max:255',
                 'customer_phone' => 'nullable|string|max:20',
@@ -415,7 +514,9 @@ class OrderController extends AdminController
                 $validated['seat_ids'],
                 $validated['customer_email'],
                 $validated['customer_name'],
-                $validated['customer_phone'] ?? null
+                $validated['customer_phone'] ?? null,
+                $validated['products'] ?? [],
+                $validated['promotion_code'] ?? null
             );
 
             if (!$result['success']) {
