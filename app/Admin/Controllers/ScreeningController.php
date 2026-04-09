@@ -205,7 +205,31 @@ class ScreeningController extends AdminController
             'IMAX' => 'IMAX',
             '4DX' => '4DX',
         ])->default('2D');
+        $languageOptions = $this->getLanguageOptionsForMovie(
+            $form->model()->movie_id ?? (int) request()->input('movie_id')
+        );
+        $form->select('language', 'Idioma')
+            ->options($languageOptions)
+            ->default(array_key_first($languageOptions) ?? 'espanol')
+            ->rules('required');
         $form->switch('is_active', __('admin.status'))->default(1);
+
+        $form->saving(function (Form $form) {
+            $roomId = (int) ($form->input('room_id') ?? ($form->model()->room_id ?? 0));
+            if ($roomId > 0) {
+                $room = Room::find($roomId);
+                if ($room) {
+                    $form->model()->available_seats = $this->getAvailableSeatsForRoom($room);
+                }
+            }
+
+            $movieId = (int) ($form->input('movie_id') ?? ($form->model()->movie_id ?? 0));
+            $language = $form->input('language') ?? null;
+            $allowed = $this->getLanguageKeysForMovie($movieId);
+            if (!$language || !in_array($language, $allowed, true)) {
+                $form->model()->language = $allowed[0] ?? 'espanol';
+            }
+        });
 
         $selectedRoomId = request()->input('room_id');
         if (empty($selectedRoomId) && $form->model()->exists) {
@@ -249,6 +273,7 @@ class ScreeningController extends AdminController
         }
 
         $form->ignore(['excluded_seat_ids']);
+        $form->html($this->getMovieLanguagesDynamicScript());
         $form->html($this->getExcludedSeatsDynamicScript());
 
         $form->saved(function (Form $form) {
@@ -534,6 +559,42 @@ class ScreeningController extends AdminController
         return parent::update($id);
     }
 
+    private function getMovieLanguagesDynamicScript(): string
+    {
+        $url = route('admin.screenings.movie-languages.options');
+
+        return <<<HTML
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const movieSelect = document.querySelector('select.movie_id');
+    const languageSelect = document.querySelector('select.language');
+    if (!movieSelect || !languageSelect) return;
+
+    const reloadLanguages = function (movieId) {
+        if (!movieId) return;
+        admin.ajax.post('{$url}', { query: movieId }, function (response) {
+            const items = Array.isArray(response.data) ? response.data : [];
+            languageSelect.innerHTML = '';
+            items.forEach(function (item, index) {
+                const option = document.createElement('option');
+                option.value = item.id;
+                option.textContent = item.text;
+                if (index === 0) {
+                    option.selected = true;
+                }
+                languageSelect.appendChild(option);
+            });
+        });
+    };
+
+    movieSelect.addEventListener('change', function () {
+        reloadLanguages(this.value);
+    });
+});
+</script>
+HTML;
+    }
+
     private function getExcludedSeatsDynamicScript(): string
     {
         $url = route('admin.screenings.room-seats.options');
@@ -614,6 +675,22 @@ HTML;
                 ];
             })
             ->values();
+
+        return response()->json($data);
+    }
+
+    public function movieLanguagesOptions(Request $request)
+    {
+        $movieId = (int) $request->input('query');
+        $options = $this->getLanguageOptionsForMovie($movieId);
+
+        $data = [];
+        foreach ($options as $id => $text) {
+            $data[] = [
+                'id' => $id,
+                'text' => $text,
+            ];
+        }
 
         return response()->json($data);
     }
@@ -710,6 +787,28 @@ HTML;
         ]);
     }
 
+    private function getLanguageOptionsForMovie(?int $movieId): array
+    {
+        $labels = [
+            'espanol' => 'Espanol',
+            'castellano' => 'Castellano',
+            'subtitulado' => 'Subtitulado',
+        ];
+
+        $movie = $movieId ? Movie::find($movieId) : null;
+        $languages = $movie?->available_languages ?? ['espanol'];
+        if (empty($languages)) {
+            $languages = ['espanol'];
+        }
+
+        return array_intersect_key($labels, array_flip($languages));
+    }
+
+    private function getLanguageKeysForMovie(?int $movieId): array
+    {
+        return array_keys($this->getLanguageOptionsForMovie($movieId));
+    }
+
     /**
      * Exportar screenings a Excel
      */
@@ -766,6 +865,7 @@ HTML;
             'start_time' => 'required|date_format:H:i',
             'price' => 'required|numeric|min:0.01',
             'format' => 'required|string',
+            'language' => 'nullable|string|in:espanol,castellano,subtitulado',
             'is_active' => 'required|in:0,1',
         ]);
 
@@ -811,6 +911,11 @@ HTML;
         $price = (float) $validated['price'];
         $format = (string) $validated['format'];
         $isActive = (int) $validated['is_active'] === 1;
+        $language = $validated['language'] ?? null;
+        $movieLanguages = $movie->available_languages;
+        if (!$language || !in_array($language, $movieLanguages, true)) {
+            $language = $movieLanguages[0] ?? 'espanol';
+        }
 
         $availableSeats = $this->getAvailableSeatsForRoom($room);
 
@@ -826,6 +931,7 @@ HTML;
             $time,
             $price,
             $format,
+            $language,
             $isActive,
             $durationMinutes,
             $availableSeats,
@@ -857,6 +963,7 @@ HTML;
                             'end_time' => $startTime->copy()->addMinutes($durationMinutes),
                             'price' => $price,
                             'format' => $format,
+                            'language' => $language,
                             'available_seats' => $availableSeats,
                             'is_active' => $isActive,
                         ]);

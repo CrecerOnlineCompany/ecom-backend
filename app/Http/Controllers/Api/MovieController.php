@@ -52,13 +52,25 @@ class MovieController extends Controller
             'rating' => 'nullable|string',
             'director' => 'nullable|string',
             'cast' => 'nullable|string',
-            'language' => 'required|string|default:es',
+            'language' => 'nullable|string',
+            'languages' => 'nullable|array',
+            'languages.*' => 'in:espanol,castellano,subtitulado',
             'poster_url' => 'nullable|url',
             'trailer_url' => 'nullable|url',
             'release_date' => 'required|date',
             'end_date' => 'nullable|date|after:release_date',
             'is_active' => 'boolean',
         ]);
+
+        $hasLanguageInput = array_key_exists('languages', $validated) || array_key_exists('language', $validated);
+        if ($hasLanguageInput) {
+            $languages = Movie::normalizeLanguages(
+                $validated['languages'] ?? null,
+                $validated['language'] ?? null
+            );
+            $validated['languages'] = $languages;
+            $validated['language'] = $languages[0] ?? 'espanol';
+        }
 
         $movie = Movie::create($validated);
         return response()->json($movie, 201);
@@ -79,6 +91,7 @@ class MovieController extends Controller
                 'duration',
                 'director',
                 'description',
+                'languages',
             ])
             ->findOrFail($movie->id);
 
@@ -91,6 +104,7 @@ class MovieController extends Controller
             'duration' => $movie->duration,
             'director' => $movie->director,
             'synopsis' => $movie->description,
+            'languages' => $movie->available_languages,
         ]);
     }
 
@@ -107,13 +121,22 @@ class MovieController extends Controller
             'rating' => 'nullable|string',
             'director' => 'nullable|string',
             'cast' => 'nullable|string',
-            'language' => 'sometimes|string',
+            'language' => 'nullable|string',
+            'languages' => 'nullable|array',
+            'languages.*' => 'in:espanol,castellano,subtitulado',
             'poster_url' => 'nullable|url',
             'trailer_url' => 'nullable|url',
             'release_date' => 'sometimes|date',
             'end_date' => 'nullable|date|after:release_date',
             'is_active' => 'boolean',
         ]);
+
+        $languages = Movie::normalizeLanguages(
+            $validated['languages'] ?? null,
+            $validated['language'] ?? null
+        );
+        $validated['languages'] = $languages;
+        $validated['language'] = $languages[0] ?? 'espanol';
 
         $movie->update($validated);
         return response()->json($movie);

@@ -38,7 +38,10 @@ class MovieController extends AdminController
         $grid->column('genre', __('admin.genre'))->sortable();
         $grid->column('duration', __('admin.duration'))->sortable();
         $grid->column('rating', __('admin.rating'));
-        $grid->column('language', __('admin.language'))->sortable();
+        $grid->column('available_languages', __('admin.language'))->display(function () {
+            $languages = $this->available_languages ?? [];
+            return empty($languages) ? '-' : implode(', ', $languages);
+        });
         $grid->column('release_date', __('admin.release_date'))->sortable()->display(function ($value) {
             return \Carbon\Carbon::parse($value)->format('d/m/Y');
         });
@@ -66,7 +69,10 @@ class MovieController extends AdminController
         $show->field('rating', __('admin.rating'));
         $show->field('director', __('admin.director'));
         $show->field('cast', __('admin.cast'));
-        $show->field('language', __('admin.language'));
+        $show->field('available_languages', __('admin.language'))->as(function () {
+            $languages = $this->available_languages ?? [];
+            return empty($languages) ? '-' : implode(', ', $languages);
+        });
         $show->field('poster_image', __('admin.poster_image'))->display(function ($value) {
             return $value ? '<img src="/images/movies/'.$value.'" style="max-width:300px;height:auto;" />' : '-';
         });
@@ -102,12 +108,11 @@ class MovieController extends AdminController
             ->help(__('admin.rating_help'));
         $form->text('director', __('admin.director'))->rules('nullable|string');
         $form->text('cast', __('admin.cast'))->rules('nullable|string');
-        $form->select('language', __('admin.language'))->options([
-            'es' => __('admin.spanish'),
-            'en' => __('admin.english'),
-            'fr' => __('admin.french'),
-            'de' => __('admin.german'),
-        ])->default('es');
+        $form->multipleSelect('languages', __('admin.language'))->options([
+            'espanol' => 'Espanol',
+            'castellano' => 'Castellano',
+            'subtitulado' => 'Subtitulado',
+        ])->default(['espanol']);
         $form->file('poster_image', __('admin.poster_image'))
             ->disk('admin')
             ->rules('nullable|mimes:jpeg,png,jpg,gif,webp|max:5120')
@@ -117,6 +122,13 @@ class MovieController extends AdminController
         $form->date('release_date', __('admin.release_date'))->rules('required|date');
         $form->date('end_date', __('admin.end_date'))->rules('nullable|date|after:release_date');
         $form->switch('is_active', __('admin.status'))->default(1);
+
+        $form->saving(function (Form $form) {
+            $languages = $form->input('languages') ?? [];
+            $normalized = Movie::normalizeLanguages(is_array($languages) ? $languages : null, null);
+            $form->model()->languages = $normalized;
+            $form->model()->language = $normalized[0] ?? 'espanol';
+        });
 
         $form->deleting(function (Form $form) {
             $this->handleImageDelete($form->model());
@@ -135,6 +147,22 @@ class MovieController extends AdminController
         }
     }
 
+    private function getLanguageOptionsForMovie(Movie $movie): array
+    {
+        $labels = [
+            'espanol' => 'Espanol',
+            'castellano' => 'Castellano',
+            'subtitulado' => 'Subtitulado',
+        ];
+
+        $languages = $movie->available_languages;
+        if (empty($languages)) {
+            $languages = ['espanol'];
+        }
+
+        return array_intersect_key($labels, array_flip($languages));
+    }
+
     public function showWeeklyScreeningsForm(Movie $movie)
     {
         $rooms = Room::query()
@@ -144,9 +172,12 @@ class MovieController extends AdminController
             ->orderBy('name')
             ->get();
 
+        $languageOptions = $this->getLanguageOptionsForMovie($movie);
+
         return view('admin.movies.weekly-screenings', [
             'movie' => $movie,
             'rooms' => $rooms,
+            'language_options' => $languageOptions,
         ]);
     }
 
@@ -161,6 +192,7 @@ class MovieController extends AdminController
             'start_time' => 'required|date_format:H:i',
             'price' => 'required|numeric|min:0.01',
             'format' => 'required|string',
+            'language' => 'nullable|string|in:espanol,castellano,subtitulado',
             'is_active' => 'required|in:0,1',
         ]);
 
@@ -194,6 +226,11 @@ class MovieController extends AdminController
         $price = (float) $validated['price'];
         $format = (string) $validated['format'];
         $isActive = (int) $validated['is_active'] === 1;
+        $language = $validated['language'] ?? null;
+        $movieLanguages = $movie->available_languages;
+        if (!$language || !in_array($language, $movieLanguages, true)) {
+            $language = $movieLanguages[0] ?? 'espanol';
+        }
 
         $availableSeats = $this->getAvailableSeatsForRoom($room);
 
@@ -209,6 +246,7 @@ class MovieController extends AdminController
             $time,
             $price,
             $format,
+            $language,
             $isActive,
             $durationMinutes,
             $availableSeats,
@@ -240,6 +278,7 @@ class MovieController extends AdminController
                             'end_time' => $startTime->copy()->addMinutes($durationMinutes),
                             'price' => $price,
                             'format' => $format,
+                            'language' => $language,
                             'available_seats' => $availableSeats,
                             'is_active' => $isActive,
                         ]);

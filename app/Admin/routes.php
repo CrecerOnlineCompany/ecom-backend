@@ -35,6 +35,7 @@ Route::group([
     $router->get('screenings/{screening}/remove-auto-2x1', 'ScreeningController@removeAutoTwoByOne')
         ->name('screenings.remove-auto-2x1');
     $router->post('screenings/movie-rooms-options', 'ScreeningController@movieRoomsOptions')->name('screenings.movie-rooms.options');
+    $router->post('screenings/movie-languages-options', 'ScreeningController@movieLanguagesOptions')->name('screenings.movie-languages.options');
     $router->post('screenings/room-seats-options', 'ScreeningController@roomSeatsOptions')->name('screenings.room-seats.options');
     $router->get('screenings/export/excel', 'ScreeningController@exportExcel')->name('screenings.export.excel');
     $router->get('screenings/export/csv', 'ScreeningController@exportCsv')->name('screenings.export.csv');

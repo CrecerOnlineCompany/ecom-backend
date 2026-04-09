@@ -127,6 +127,28 @@ class MercadoPagoTerminalService
                         return $result;
                     }
 
+                    // Caso controlado: MP indica 'expired', no es cancelable y no debe bloquear.
+                    if ($parsedStatus === 'expired') {
+                        $result['cancel_error'] = null;
+                        $result['can_proceed'] = true;
+                        $result['non_blocking_cancel_error'] = 'cannot_cancel_order_expired';
+                        $result['non_blocking_order_status'] = $parsedStatus;
+
+                        $mpOrder = MpTerminalOrder::where('order_id', $activeOrder['order_id'])->first();
+                        if ($mpOrder) {
+                            $mpOrder->markExpired();
+                        }
+
+                        Log::warning('MercadoPagoTerminal: Orden expirada, flujo continua y se marca en BD', [
+                            'order_id' => $activeOrder['order_id'],
+                            'error_code' => $errorCode,
+                            'order_status' => $parsedStatus,
+                            'api_message' => $apiMessage,
+                        ]);
+
+                        return $result;
+                    }
+
                     // Para otros estados no cancelables, mantener bloqueo.
                     $result['cancel_error'] = $errorBody;
                     $result['can_proceed'] = false;

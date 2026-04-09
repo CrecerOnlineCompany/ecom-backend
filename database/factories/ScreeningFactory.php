@@ -34,6 +34,7 @@ class ScreeningFactory extends Factory
             'price' => $this->faker->numberBetween(15000, 30000),
             'available_seats' => $this->faker->numberBetween(50, 150),
             'format' => $this->faker->randomElement(['2D', '3D', 'IMAX']),
+            'language' => 'espanol',
             'is_active' => true,
         ];
     }

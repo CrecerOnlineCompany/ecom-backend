@@ -21,6 +21,7 @@ class Movie extends Model
         'director',
         'cast',
         'language',
+        'languages',
         'poster_url',
         'poster_image',
         'trailer_url',
@@ -33,10 +34,18 @@ class Movie extends Model
         'is_active' => 'boolean',
         'release_date' => 'date',
         'end_date' => 'date',
+        'languages' => 'array',
     ];
 
     protected $appends = [
         'poster_image_url',
+        'available_languages',
+    ];
+
+    public const LANGUAGE_OPTIONS = [
+        'espanol',
+        'castellano',
+        'subtitulado',
     ];
 
     public function screenings(): HasMany
@@ -53,6 +62,45 @@ class Movie extends Model
             return url('/images/movies/' . $this->poster_image);
         }
         return null;
+    }
+
+    public function getAvailableLanguagesAttribute(): array
+    {
+        return self::normalizeLanguages($this->languages ?? null, $this->language ?? null);
+    }
+
+    public static function normalizeLanguages(?array $languages, ?string $legacy = null): array
+    {
+        $values = $languages ?? [];
+        if (empty($values) && $legacy) {
+            $values = [$legacy];
+        }
+
+        $normalized = [];
+        foreach ($values as $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+            $lower = strtolower(trim($value));
+            $mapped = match ($lower) {
+                'es', 'espanol' => 'espanol',
+                'castellano' => 'castellano',
+                'subtitulado' => 'subtitulado',
+                default => null,
+            };
+            if ($mapped && !in_array($mapped, $normalized, true)) {
+                $normalized[] = $mapped;
+            }
+        }
+
+        return empty($normalized) ? ['espanol'] : $normalized;
+    }
+
+    public function setLanguagesAttribute($value): void
+    {
+        $normalized = self::normalizeLanguages(is_array($value) ? $value : null, $this->language ?? null);
+        $this->attributes['languages'] = json_encode($normalized);
+        $this->attributes['language'] = $normalized[0] ?? 'espanol';
     }
 
     /**

@@ -40,15 +40,26 @@ class OrderNumberGenerator
     private static function generateWithLocking(): string
     {
         $date = now()->format('Ymd');
-        
-        // Usar lockForUpdate para asegurar que solo un proceso genera el número a la vez
-        // Esto previene race conditions cuando múltiples requests llegan simultáneamente
-        $today_count = Order::whereDate('created_at', now()->startOfDay())
+
+        // Usar lockForUpdate para asegurar que solo un proceso genera el número a la vez.
+        // Tomar el ultimo order_number del dia (incluye soft-deleted) evita colisiones.
+        $prefix = "ORD-{$date}-";
+        $lastOrder = Order::withTrashed()
+            ->where('order_number', 'like', $prefix . '%')
             ->lockForUpdate()
-            ->count();
-        
-        // Secuencial del día (4 dígitos)
-        $sequence = str_pad($today_count + 1, 4, '0', STR_PAD_LEFT);
+            ->orderBy('order_number', 'desc')
+            ->first();
+
+        $lastSequence = 0;
+        if ($lastOrder && is_string($lastOrder->order_number)) {
+            $sequencePart = substr($lastOrder->order_number, strlen($prefix), 4);
+            if (ctype_digit($sequencePart)) {
+                $lastSequence = (int) $sequencePart;
+            }
+        }
+
+        // Secuencial del dia (4 digitos)
+        $sequence = str_pad($lastSequence + 1, 4, '0', STR_PAD_LEFT);
         
         // Generar check digit (suma de dígitos, módulo 10)
         $check_digit = self::calculateCheckDigit($date . $sequence);

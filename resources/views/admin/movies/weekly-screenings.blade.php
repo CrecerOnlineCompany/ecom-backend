@@ -106,6 +106,17 @@
                         </div>
 
                         <div class="form-group mb-3">
+                            <label>Idioma</label>
+                            <select class="form-control" name="language" required>
+                                @foreach ($language_options as $value => $label)
+                                    <option value="{{ $value }}" @selected(old('language', array_key_first($language_options)) === $value)>
+                                        {{ $label }}
+                                    </option>
+                                @endforeach
+                            </select>
+                        </div>
+
+                        <div class="form-group mb-3">
                             <label>Activa</label>
                             <select class="form-control" name="is_active" required>
                                 <option value="1" @selected(old('is_active', '1') == '1')>Sí</option>

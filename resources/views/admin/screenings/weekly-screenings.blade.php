@@ -118,6 +118,15 @@
                         </div>
 
                         <div class="form-group mb-3">
+                            <label>Idioma</label>
+                            <select class="form-control" name="language" id="weekly-language" required>
+                                <option value="espanol" @selected(old('language', 'espanol') === 'espanol')>Espanol</option>
+                                <option value="castellano" @selected(old('language') === 'castellano')>Castellano</option>
+                                <option value="subtitulado" @selected(old('language') === 'subtitulado')>Subtitulado</option>
+                            </select>
+                        </div>
+
+                        <div class="form-group mb-3">
                             <label>Activa</label>
                             <select class="form-control" name="is_active" required>
                                 <option value="1" @selected(old('is_active', '1') == '1')>Sí</option>
@@ -137,4 +146,39 @@
         </div>
     </div>
 </div>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const movieSelect = document.querySelector('select[name="movie_id"]');
+        const languageSelect = document.getElementById('weekly-language');
+        if (!movieSelect || !languageSelect) return;
+
+        const url = '{{ route('admin.screenings.movie-languages.options') }}';
+
+        const reloadLanguages = function (movieId) {
+            if (!movieId) return;
+            admin.ajax.post(url, { query: movieId }, function (response) {
+                const items = Array.isArray(response.data) ? response.data : [];
+                if (items.length === 0) return;
+                languageSelect.innerHTML = '';
+                items.forEach(function (item, index) {
+                    const option = document.createElement('option');
+                    option.value = item.id;
+                    option.textContent = item.text;
+                    if (index === 0) {
+                        option.selected = true;
+                    }
+                    languageSelect.appendChild(option);
+                });
+            });
+        };
+
+        movieSelect.addEventListener('change', function () {
+            reloadLanguages(this.value);
+        });
+
+        if (movieSelect.value) {
+            reloadLanguages(movieSelect.value);
+        }
+    });
+    </script>
 @endsection

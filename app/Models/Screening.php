@@ -21,6 +21,7 @@ class Screening extends Model
         'price',
         'available_seats',
         'format',
+        'language',
         'is_active',
     ];
 

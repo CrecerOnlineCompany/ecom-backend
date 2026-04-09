@@ -7,6 +7,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Screening;
 use App\Models\ScreeningSeat;
 use App\Models\Room;
+use App\Models\Movie;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -26,6 +27,7 @@ class ScreeningController extends Controller
                 'screenings.id',
                 'screenings.start_time',
                 'screenings.format',
+                'screenings.language',
                 'screenings.available_seats',
                 'rooms.cinema_id',
                 'cinemas.name as cinema_name',
@@ -85,8 +87,16 @@ class ScreeningController extends Controller
             'end_time' => 'required|date_format:Y-m-d H:i:s|after:start_time',
             'price' => 'required|numeric|min:0.01',
             'format' => 'required|string',
+            'language' => 'nullable|string|in:espanol,castellano,subtitulado',
             'is_active' => 'boolean',
         ]);
+
+        $movie = Movie::findOrFail($validated['movie_id']);
+        $movieLanguages = $movie->available_languages;
+        $language = $validated['language'] ?? null;
+        if (!$language || !in_array($language, $movieLanguages, true)) {
+            $validated['language'] = $movieLanguages[0] ?? 'espanol';
+        }
 
         $room = Room::find($validated['room_id']);
         $validated['available_seats'] = $room->total_seats;
@@ -109,9 +119,10 @@ class ScreeningController extends Controller
                 'price',
                 'available_seats',
                 'format',
+                'language',
             ])
             ->with([
-                'movie:id,title',
+                'movie:id,title,languages,language',
                 'room:id,cinema_id,number,non_number',
                 'room.cinema:id,name',
             ])
@@ -126,7 +137,9 @@ class ScreeningController extends Controller
             'price' => $screening->price,
             'available_seats' => $screening->available_seats,
             'format' => $screening->format,
+            'language' => $screening->language,
             'movie_title' => $screening->movie?->title,
+            'movie_languages' => $screening->movie?->available_languages ?? [],
             'cinema_name' => $screening->room?->cinema?->name,
             'room_number' => $screening->room?->number,
             'non_number' => (bool) ($screening->room?->non_number ?? false),
@@ -145,8 +158,24 @@ class ScreeningController extends Controller
             'end_time' => 'sometimes|date_format:Y-m-d H:i:s',
             'price' => 'sometimes|numeric|min:0.01',
             'format' => 'sometimes|string',
+            'language' => 'nullable|string|in:espanol,castellano,subtitulado',
             'is_active' => 'boolean',
         ]);
+
+        if (array_key_exists('language', $validated)) {
+            $movie = null;
+            if (!empty($validated['movie_id'])) {
+                $movie = Movie::find($validated['movie_id']);
+            }
+            if (!$movie) {
+                $movie = $screening->movie;
+            }
+            $movieLanguages = $movie?->available_languages ?? ['espanol'];
+            $language = $validated['language'] ?? null;
+            if (!$language || !in_array($language, $movieLanguages, true)) {
+                $validated['language'] = $movieLanguages[0] ?? 'espanol';
+            }
+        }
 
         $screening->update($validated);
         return response()->json($screening);

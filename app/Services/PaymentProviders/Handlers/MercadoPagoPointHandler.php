@@ -125,13 +125,14 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
             }
 
             $orderId = $result['order_id'];
+            $usedIdempotencyKey = $result['idempotency_key'] ?? $idempotencyKey;
 
             $responseData = [
                 'terminal_id' => $terminalId,
                 'external_reference' => $externalReference,
                 'order_id' => $orderId,
                 'amount' => $amountFormatted,
-                'idempotency_key' => $idempotencyKey, // Mantener el key usado
+                'idempotency_key' => $usedIdempotencyKey, // Mantener el key efectivamente usado
                 'payload' => [
                     'type' => 'point',
                     'external_reference' => $externalReference,
@@ -280,6 +281,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                 return [
                     'success' => true,
                     'order_id' => $data['id'],
+                    'idempotency_key' => $idempotencyKey,
                 ];
             }
             return [
@@ -297,6 +299,58 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
         if ($statusCode === 409) {
             $errorData = $response->json();
             $errorCode = $errorData['errors'][0]['code'] ?? null;
+
+            // La key ya fue usada por MP. Reintentamos una vez con una nueva para evitar bloqueo del flujo.
+            if ($errorCode === 'idempotency_key_already_used' && self::AUTO_CANCEL_RETRY_ONCE) {
+                $newIdempotencyKey = $this->generateIdempotencyKey($paymentTicket->id, true);
+
+                Log::warning('MercadoPagoPoint: 409 idempotency_key_already_used, reintentando con nueva key', [
+                    'external_reference' => $externalReference,
+                    'terminal_id' => $terminalId,
+                    'previous_idempotency_key' => $idempotencyKey,
+                    'new_idempotency_key' => $newIdempotencyKey,
+                ]);
+
+                $retryResponse = Http::withToken($accessToken)
+                    ->withHeaders([
+                        'X-Idempotency-Key' => $newIdempotencyKey,
+                        'Content-Type' => 'application/json',
+                    ])
+                    ->post(self::MP_API_BASE, $payload);
+
+                if ($retryResponse->successful()) {
+                    $retryData = $retryResponse->json();
+                    if (isset($retryData['id'])) {
+                        Log::info('MercadoPagoPoint: Reintento exitoso tras idempotency_key_already_used', [
+                            'new_order_id' => $retryData['id'],
+                            'external_reference' => $externalReference,
+                        ]);
+
+                        return [
+                            'success' => true,
+                            'order_id' => $retryData['id'],
+                            'idempotency_key' => $newIdempotencyKey,
+                            'metadata' => [
+                                'idempotency_key_rotated' => true,
+                                'previous_idempotency_key' => $idempotencyKey,
+                            ],
+                        ];
+                    }
+                }
+
+                Log::error('MercadoPagoPoint: Reintento falló tras idempotency_key_already_used', [
+                    'retry_status' => $retryResponse->status(),
+                    'retry_error' => $retryResponse->body(),
+                    'external_reference' => $externalReference,
+                ]);
+
+                return [
+                    'success' => false,
+                    'error_code' => 'idempotency_key_retry_failed',
+                    'retryable' => true,
+                    'message' => 'No se pudo crear orden tras regenerar la idempotency key.',
+                ];
+            }
 
             if ($errorCode === 'already_queued_order_on_terminal') {
                 Log::warning('MercadoPagoPoint: 409 en sendToTerminal (race condition?)', [
@@ -345,6 +399,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
                             return [
                                 'success' => true,
                                 'order_id' => $retryData['id'],
+                                'idempotency_key' => $newIdempotencyKey,
                                 'metadata' => [
                                     'canceled_order_id' => $guardResult['cancelled_order_id'],
                                     'auto_canceled' => true,
