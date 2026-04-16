@@ -60,6 +60,126 @@ class PromotionEngineServiceTest extends TestCase
         $this->assertEquals(OrderItem::TYPE_PROMOTION_DISCOUNT, $result['discount_items'][0]['item_type']);
     }
 
+    public function test_apply_bxgy_with_percentage_on_ticket_items(): void
+    {
+        Promotion::create([
+            'code' => 'PROMO-BXGY-25',
+            'name' => 'BxGy 25% en entradas',
+            'type' => Promotion::TYPE_BXGY,
+            'is_active' => true,
+            'is_automatic' => false,
+            'is_stackable' => false,
+            'priority' => 1,
+            'settings' => [
+                'buy_qty' => 2,
+                'pay_qty' => 0,
+                'percentage' => 25,
+                'target_item_type' => OrderItem::TYPE_TICKET_SEAT,
+            ],
+        ]);
+
+        $baseItems = [
+            [
+                'item_type' => OrderItem::TYPE_TICKET_SEAT,
+                'quantity' => 1,
+                'unit_price' => 100.00,
+                'subtotal' => 100.00,
+            ],
+            [
+                'item_type' => OrderItem::TYPE_TICKET_SEAT,
+                'quantity' => 1,
+                'unit_price' => 120.00,
+                'subtotal' => 120.00,
+            ],
+        ];
+
+        /** @var PromotionEngineService $engine */
+        $engine = app(PromotionEngineService::class);
+        $result = $engine->applyPromotions($baseItems, ['promotion_code' => 'PROMO-BXGY-25']);
+
+        // Se aplican 2 unidades bonificadas del set (2x0), con 25% sobre cada una.
+        $this->assertEquals(55.00, (float) $result['total_discount']);
+        $this->assertEquals(25.0, (float) ($result['applied_promotions'][0]['details']['percentage'] ?? 0));
+    }
+
+    public function test_apply_bxgy_limits_free_tickets_per_combo(): void
+    {
+        Promotion::create([
+            'code' => 'PROMO-COMBO-MAX2',
+            'name' => 'Max 2 entradas por combo',
+            'type' => Promotion::TYPE_BXGY,
+            'is_active' => true,
+            'is_automatic' => false,
+            'is_stackable' => false,
+            'priority' => 1,
+            'settings' => [
+                'buy_qty' => 2,
+                'pay_qty' => 0,
+                'target_item_type' => OrderItem::TYPE_TICKET_SEAT,
+                'qualifier_item_type' => OrderItem::TYPE_PRODUCT,
+                'qualifier_codes' => ['COMBO_2G_PG'],
+                'max_free_units_per_qualifier' => 2,
+            ],
+        ]);
+
+        $baseItems = [
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:1', 'quantity' => 1, 'unit_price' => 100.00, 'subtotal' => 100.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:2', 'quantity' => 1, 'unit_price' => 110.00, 'subtotal' => 110.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:3', 'quantity' => 1, 'unit_price' => 120.00, 'subtotal' => 120.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:4', 'quantity' => 1, 'unit_price' => 130.00, 'subtotal' => 130.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:5', 'quantity' => 1, 'unit_price' => 140.00, 'subtotal' => 140.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:6', 'quantity' => 1, 'unit_price' => 150.00, 'subtotal' => 150.00],
+            ['item_type' => OrderItem::TYPE_PRODUCT, 'item_code' => 'COMBO_2G_PG', 'quantity' => 1, 'unit_price' => 200.00, 'subtotal' => 200.00],
+        ];
+
+        /** @var PromotionEngineService $engine */
+        $engine = app(PromotionEngineService::class);
+        $result = $engine->applyPromotions($baseItems, ['promotion_code' => 'PROMO-COMBO-MAX2']);
+
+        // Sin límite serían 6 bonificadas; con 1 combo y tope 2 por combo, bonifica solo 2 (las más baratas).
+        $this->assertEquals(210.00, (float) $result['total_discount']);
+        $this->assertEquals(2, (int) ($result['applied_promotions'][0]['details']['free_units'] ?? 0));
+    }
+
+    public function test_apply_bxgy_grants_four_free_tickets_for_two_combos(): void
+    {
+        Promotion::create([
+            'code' => 'PROMO-COMBO-2X2',
+            'name' => 'Hasta 2 entradas por combo',
+            'type' => Promotion::TYPE_BXGY,
+            'is_active' => true,
+            'is_automatic' => false,
+            'is_stackable' => false,
+            'priority' => 1,
+            'settings' => [
+                'buy_qty' => 2,
+                'pay_qty' => 0,
+                'percentage' => 100,
+                'target_item_type' => OrderItem::TYPE_TICKET_SEAT,
+                'qualifier_item_type' => OrderItem::TYPE_PRODUCT,
+                'qualifier_codes' => ['COMBO_2G_PG'],
+                'max_free_units_per_qualifier' => 2,
+            ],
+        ]);
+
+        $baseItems = [
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:1', 'quantity' => 1, 'unit_price' => 100.00, 'subtotal' => 100.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:2', 'quantity' => 1, 'unit_price' => 110.00, 'subtotal' => 110.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:3', 'quantity' => 1, 'unit_price' => 120.00, 'subtotal' => 120.00],
+            ['item_type' => OrderItem::TYPE_TICKET_SEAT, 'item_code' => 'SEAT:4', 'quantity' => 1, 'unit_price' => 130.00, 'subtotal' => 130.00],
+            // Dos combos en una sola línea con quantity=2.
+            ['item_type' => OrderItem::TYPE_PRODUCT, 'item_code' => 'COMBO_2G_PG', 'quantity' => 2, 'unit_price' => 200.00, 'subtotal' => 400.00],
+        ];
+
+        /** @var PromotionEngineService $engine */
+        $engine = app(PromotionEngineService::class);
+        $result = $engine->applyPromotions($baseItems, ['promotion_code' => 'PROMO-COMBO-2X2']);
+
+        // 2 combos * 2 entradas por combo = 4 entradas bonificables (100%).
+        $this->assertEquals(460.00, (float) $result['total_discount']);
+        $this->assertEquals(4, (int) ($result['applied_promotions'][0]['details']['free_units'] ?? 0));
+    }
+
     public function test_screening_scoped_promotion_only_applies_to_matching_screening(): void
     {
         Promotion::create([

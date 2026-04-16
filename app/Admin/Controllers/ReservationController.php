@@ -24,6 +24,7 @@ class ReservationController extends AdminController
     {
         $grid = new Grid(new ScreeningSeat());
         $selectedStatus = request()->input('status');
+        $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
 
         $grid->model()
             ->with(['order', 'seat', 'screening.movie', 'screening.room.cinema'])
@@ -45,12 +46,16 @@ class ReservationController extends AdminController
         $grid->column('room_name', 'Sala')->display(function () {
             return optional(optional($this->screening)->room)->name ?: '-';
         });
-        $grid->column('screening.start_time', 'Función')->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i') : '-';
+        $grid->column('screening.start_time', 'Función')->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i')
+                : '-';
         });
         $grid->column('seat.seat_code', 'Asiento');
-        $grid->column('reserved_until', 'Reservado hasta')->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $grid->column('reserved_until', 'Reservado hasta')->sortable()->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
         $grid->column('reserved_by_type', 'Tipo Reserva');
         $grid->column('reserved_by_id', 'ID Reserva');
@@ -63,11 +68,15 @@ class ReservationController extends AdminController
             ScreeningSeat::STATUS_RESERVED => 'warning',
             ScreeningSeat::STATUS_SOLD => 'danger',
         ]);
-        $grid->column('created_at', 'Creada')->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $grid->column('created_at', 'Creada')->sortable()->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
-        $grid->column('updated_at', 'Actualizada')->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $grid->column('updated_at', 'Actualizada')->sortable()->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
 
         $grid->filter(function ($filter) {
@@ -117,6 +126,7 @@ class ReservationController extends AdminController
     protected function detail($id)
     {
         $show = new Show(ScreeningSeat::findOrFail($id));
+        $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
         $show->panel()->tools(function ($tools) {
             $tools->disableEdit();
             $tools->disableDelete();
@@ -127,17 +137,29 @@ class ReservationController extends AdminController
         $show->field('screening.movie.title', 'Película');
         $show->field('screening.room.cinema.name', 'Cine');
         $show->field('screening.room.name', 'Sala');
-        $show->field('screening.start_time', 'Función')->as(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $show->field('screening.start_time', 'Función')->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
         $show->field('seat.seat_code', 'Asiento');
         $show->field('reserved_by_type', 'Tipo Reserva');
         $show->field('reserved_by_id', 'ID Reserva');
-        $show->field('reserved_until', 'Reservado hasta')->as(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $show->field('reserved_until', 'Reservado hasta')->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
-        $show->field('created_at', __('admin.created_at'));
-        $show->field('updated_at', __('admin.updated_at'));
+        $show->field('created_at', __('admin.created_at'))->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
+        $show->field('updated_at', __('admin.updated_at'))->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
 
         return $show;
     }

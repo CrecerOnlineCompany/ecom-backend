@@ -35,6 +35,8 @@ class OrderController extends AdminController
     {
         $grid = new Grid(new Order());
 
+        $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
+
         $grid->model()->orderByDesc('id');
 
         $grid->disableCreateButton();
@@ -65,14 +67,20 @@ class OrderController extends AdminController
             'expired' => 'default',
             'refunded' => 'primary',
         ]);
-        $grid->column('reserved_until', 'Reserva hasta')->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $grid->column('reserved_until', 'Reserva hasta')->sortable()->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
-        $grid->column('paid_at', 'Pagado')->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $grid->column('paid_at', 'Pagado')->sortable()->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
-        $grid->column('created_at', __('admin.created_at'))->sortable()->display(function ($value) {
-            return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+        $grid->column('created_at', __('admin.created_at'))->sortable()->display(function ($value) use ($businessTimezone) {
+            return $value
+                ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
         });
 
         $grid->filter(function ($filter) {
@@ -108,6 +116,7 @@ class OrderController extends AdminController
     protected function detail($id)
     {
         $show = new Show(Order::findOrFail($id));
+        $businessTimezone = config('app.screening_timezone', 'America/Argentina/Buenos_Aires');
         $show->panel()->tools(function ($tools) {
             $tools->disableEdit();
             $tools->disableDelete();
@@ -149,27 +158,51 @@ class OrderController extends AdminController
 
         $show->divider();
 
-        $show->field('reserved_until', 'Reserva hasta');
-        $show->field('paid_at', 'Pagado');
-        $show->field('cancelled_at', 'Cancelado');
-        $show->field('created_at', __('admin.created_at'));
-        $show->field('updated_at', __('admin.updated_at'));
+        $show->field('reserved_until', 'Reserva hasta')->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
+        $show->field('paid_at', 'Pagado')->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
+        $show->field('cancelled_at', 'Cancelado')->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
+        $show->field('created_at', __('admin.created_at'))->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
+        $show->field('updated_at', __('admin.updated_at'))->as(function ($value) use ($businessTimezone) {
+            return $value
+                ? Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                : '-';
+        });
 
-        $show->relation('tickets', 'Tickets', function ($tickets) {
+        $show->relation('tickets', 'Tickets', function ($tickets) use ($businessTimezone) {
             $tickets->column('id', __('admin.id'));
             $tickets->column('ticket_number', 'Nro Ticket');
             $tickets->column('price', 'Precio')->display(function ($value) {
                 return '$' . number_format($value, 2);
             });
             $tickets->column('status', 'Estado');
-            $tickets->column('created_at', 'Creado');
+            $tickets->column('created_at', 'Creado')->display(function ($value) use ($businessTimezone) {
+                return $value
+                    ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                    : '-';
+            });
             $tickets->disableCreateButton();
             $tickets->disableActions();
             $tickets->disableFilter();
             $tickets->disablePagination();
         });
 
-        $show->relation('paymentProviderTickets', 'Pagos asociados', function ($payments) {
+        $show->relation('paymentProviderTickets', 'Pagos asociados', function ($payments) use ($businessTimezone) {
             $payments->column('id', __('admin.id'));
             $payments->column('paymentProvider.name', 'Proveedor');
             $payments->column('transaction_id', 'Transacción');
@@ -186,11 +219,15 @@ class OrderController extends AdminController
                 'queued' => 'info',
                 'finalization_failed' => 'danger',
             ]);
-            $payments->column('initiated_at', 'Iniciado')->display(function ($value) {
-                return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+            $payments->column('initiated_at', 'Iniciado')->display(function ($value) use ($businessTimezone) {
+                return $value
+                    ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                    : '-';
             });
-            $payments->column('completed_at', 'Completado')->display(function ($value) {
-                return $value ? \Carbon\Carbon::parse($value)->format('d/m/Y H:i:s') : '-';
+            $payments->column('completed_at', 'Completado')->display(function ($value) use ($businessTimezone) {
+                return $value
+                    ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                    : '-';
             });
             $payments->disableCreateButton();
             $payments->disableActions();
@@ -198,12 +235,20 @@ class OrderController extends AdminController
             $payments->disablePagination();
         });
 
-        $show->relation('screeningSeats', 'Asientos de la orden', function ($seats) {
+        $show->relation('screeningSeats', 'Asientos de la orden', function ($seats) use ($businessTimezone) {
             $seats->column('id', __('admin.id'));
             $seats->column('seat.seat_code', 'Asiento');
             $seats->column('status', 'Estado');
-            $seats->column('reserved_until', 'Reservado hasta');
-            $seats->column('sold_at', 'Vendido');
+            $seats->column('reserved_until', 'Reservado hasta')->display(function ($value) use ($businessTimezone) {
+                return $value
+                    ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                    : '-';
+            });
+            $seats->column('sold_at', 'Vendido')->display(function ($value) use ($businessTimezone) {
+                return $value
+                    ? \Carbon\Carbon::parse($value, 'UTC')->setTimezone($businessTimezone)->format('d/m/Y H:i:s')
+                    : '-';
+            });
             $seats->disableCreateButton();
             $seats->disableActions();
             $seats->disableFilter();

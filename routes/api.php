@@ -9,6 +9,7 @@ use App\Http\Controllers\Api\ScreeningController;
 use App\Http\Controllers\Api\TicketController;
 use App\Http\Controllers\Api\PaymentController;
 use App\Http\Controllers\Api\OrderController;
+use App\Http\Controllers\Api\ConcessionProductController;
 
 /*
 |--------------------------------------------------------------------------
@@ -39,7 +40,7 @@ Route::get('/screenings/{screening}/available-seats', [ScreeningController::clas
 Route::get('/payment-providers', [PaymentController::class, 'index']);
 Route::get('/payment-providers/{id}', [PaymentController::class, 'show']);
 Route::get('/payment-methods', [PaymentController::class, 'getMethods']);
-Route::get('/concession-products', [PaymentController::class, 'getConcessionProducts']);
+Route::get('/concession-products', [ConcessionProductController::class, 'index']);
 Route::get('/payment-methods/{method}/providers', [PaymentController::class, 'getMethodProviders']);
 Route::match(['get', 'post'], '/payment/success', [PaymentController::class, 'success'])->name('api.payment.success');
 Route::match(['get', 'post'], '/payment/failure', [PaymentController::class, 'failure'])->name('api.payment.failure');
@@ -56,6 +57,7 @@ Route::post('/payment-process-batch', [PaymentController::class, 'processBatchPa
 Route::post('/payment-pricing-preview', [PaymentController::class, 'pricingPreview']);
 Route::post('/payment-process-qr', [PaymentController::class, 'processQrPayment']);
 Route::post('/payment-process-terminal', [PaymentController::class, 'processTerminalPayment']);
+Route::post('/payment-idempotency/resolve', [PaymentController::class, 'resolveIdempotencyKey']);
 Route::get('/payment-status/{paymentTicketId}', [PaymentController::class, 'status']);
 Route::get('/payment-order/{orderNumber}/details', [PaymentController::class, 'orderDetails']);
 //Route::delete('/payment-cancel/{paymentTicketId}', [PaymentController::class, 'cancelPendingPayment']);

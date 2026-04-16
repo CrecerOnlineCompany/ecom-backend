@@ -268,10 +268,21 @@ class PromotionEngineService
         $settings = is_array($promotion->settings) ? $promotion->settings : [];
         $buyQty = (int) ($settings['buy_qty'] ?? 2);
         $payQty = (int) ($settings['pay_qty'] ?? 1);
+        $percentage = isset($settings['percentage']) ? (float) $settings['percentage'] : 100.0;
         $targetType = (string) ($settings['target_item_type'] ?? OrderItem::TYPE_TICKET_SEAT);
         $targetCodes = $this->normalizeTargetCodes($settings['target_codes'] ?? []);
+        $qualifierType = trim((string) ($settings['qualifier_item_type'] ?? ''));
+        $qualifierCodes = $this->normalizeTargetCodes($settings['qualifier_codes'] ?? []);
+        $maxFreeUnitsPerQualifier = isset($settings['max_free_units_per_qualifier'])
+            ? (int) $settings['max_free_units_per_qualifier']
+            : null;
 
         if ($buyQty <= 0 || $payQty < 0 || $payQty >= $buyQty) {
+            return ['discount_amount' => 0.0];
+        }
+
+        $discountRate = max(0.0, min(100.0, $percentage));
+        if ($discountRate <= 0.0) {
             return ['discount_amount' => 0.0];
         }
 
@@ -306,9 +317,30 @@ class PromotionEngineService
             return ['discount_amount' => 0.0];
         }
 
+        if ($maxFreeUnitsPerQualifier !== null && $maxFreeUnitsPerQualifier > 0 && $qualifierType !== '') {
+            $qualifierQty = 0;
+            foreach ($baseItems as $item) {
+                if (!$this->matchesTarget($item, $qualifierType, $qualifierCodes)) {
+                    continue;
+                }
+
+                $qualifierQty += max(1, (int) ($item['quantity'] ?? 1));
+            }
+
+            if ($qualifierQty <= 0) {
+                return ['discount_amount' => 0.0];
+            }
+
+            $maxFreeUnitsByQualifier = $qualifierQty * $maxFreeUnitsPerQualifier;
+            $freeUnits = min($freeUnits, $maxFreeUnitsByQualifier);
+            if ($freeUnits <= 0) {
+                return ['discount_amount' => 0.0];
+            }
+        }
+
         $discount = 0.0;
         for ($i = 0; $i < $freeUnits && $i < $eligibleCount; $i++) {
-            $discount += (float) $eligibleUnitPrices[$i];
+            $discount += (float) $eligibleUnitPrices[$i] * ($discountRate / 100);
         }
 
         return [
@@ -316,11 +348,15 @@ class PromotionEngineService
             'details' => [
                 'buy_qty' => $buyQty,
                 'pay_qty' => $payQty,
+                'percentage' => round($discountRate, 2),
                 'target_item_type' => $targetType,
                 'target_codes' => $targetCodes,
                 'eligible_units' => $eligibleCount,
                 'applied_sets' => $sets,
                 'free_units' => $freeUnits,
+                'qualifier_item_type' => $qualifierType !== '' ? $qualifierType : null,
+                'qualifier_codes' => $qualifierCodes,
+                'max_free_units_per_qualifier' => $maxFreeUnitsPerQualifier,
             ],
         ];
     }

@@ -415,14 +415,7 @@ class PaymentController extends Controller
                         ->whereIn('status', ['processing', 'pending', 'queued'])
                         ->exists();
 
-                    if ($hasPaymentInProgress && $paymentMethod !== 'terminal') {
-                        return [
-                            'success' => false,
-                            'message' => 'La orden tiene un pago en progreso',
-                            'error_code' => 'ORDER_PAYMENT_IN_PROGRESS',
-                        ];
-                    }
-
+     
                     $isOrderOwner = $candidateOrder->customer_email === $customerEmail
                         || ($currentUserId && (int) $candidateOrder->user_id === (int) $currentUserId);
 
@@ -827,6 +820,88 @@ class PaymentController extends Controller
             return response()->json([
                 'success' => false,
                 'message' => $e->getMessage(),
+            ], 500);
+        }
+    }
+
+    /**
+     * Resolver idempotency key vigente para una orden.
+     *
+     * Caso de uso:
+     * - FE envía una key vieja y necesita recuperar la actual tras rotación.
+     * - Se valida ownership para evitar exponer datos de otra orden.
+     */
+    public function resolveIdempotencyKey(Request $request): JsonResponse
+    {
+        try {
+            $validated = $request->validate([
+                'order_number' => 'required|string|max:50',
+                'old_idempotency_key' => 'required|string|uuid',
+            ]);
+
+            $order = Order::where('order_number', $validated['order_number'])->first();
+            if (!$order) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'La orden indicada no existe',
+                    'error_code' => 'ORDER_NOT_FOUND',
+                ], 404);
+            }
+
+            $oldKey = $validated['old_idempotency_key'];
+
+            $candidatePayment = $order->paymentProviderTickets()
+                ->latest('id')
+                ->limit(20)
+                ->get()
+                ->first(function ($payment) use ($oldKey) {
+                    $responseData = $payment->response_data ?? [];
+                    $currentKey = $responseData['idempotency_key'] ?? null;
+                    $previousKey = $responseData['previous_idempotency_key'] ?? null;
+
+                    return $currentKey === $oldKey || $previousKey === $oldKey;
+                });
+
+            if (!$candidatePayment) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'La idempotency_key no corresponde a la orden indicada',
+                    'error_code' => 'IDEMPOTENCY_KEY_NOT_FOUND_FOR_ORDER',
+                ], 404);
+            }
+
+            $responseData = $candidatePayment->response_data ?? [];
+            $currentKey = $responseData['idempotency_key'] ?? null;
+            $previousKey = $responseData['previous_idempotency_key'] ?? null;
+            $rotated = (bool) ($responseData['idempotency_key_rotated'] ?? false);
+
+            if (!$currentKey) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'No hay idempotency_key vigente asociada al pago',
+                    'error_code' => 'IDEMPOTENCY_KEY_NOT_AVAILABLE',
+                ], 422);
+            }
+
+            return response()->json([
+                'success' => true,
+                'order_number' => $order->order_number,
+                'payment_ticket_id' => $candidatePayment->id,
+                'old_idempotency_key' => $oldKey,
+                'new_idempotency_key' => $currentKey,
+                'rotated' => $previousKey === $oldKey ? $rotated || ($currentKey !== $oldKey) : false,
+                'matches_current' => $currentKey === $oldKey,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('resolveIdempotencyKey error', [
+                'order_number' => $request->input('order_number'),
+                'error' => $e->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'No se pudo resolver la idempotency key',
+                'error' => app()->environment('production') ? null : $e->getMessage(),
             ], 500);
         }
     }

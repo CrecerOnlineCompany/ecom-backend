@@ -230,7 +230,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
         
         // Si aún no tenemos key, generar uno nuevo (nunca debería llegar aquí)
         if (!$idempotencyKey) {
-            $idempotencyKey = $this->generateIdempotencyKey($paymentTicket->id);
+            $idempotencyKey = $this->generateIdempotencyKey();
             
             // Guardar el idempotency_key inmediatamente
             $currentResponseData = $paymentTicket->response_data ?? [];
@@ -302,7 +302,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
 
             // La key ya fue usada por MP. Reintentamos una vez con una nueva para evitar bloqueo del flujo.
             if ($errorCode === 'idempotency_key_already_used' && self::AUTO_CANCEL_RETRY_ONCE) {
-                $newIdempotencyKey = $this->generateIdempotencyKey($paymentTicket->id, true);
+                $newIdempotencyKey = $this->generateIdempotencyKey();
 
                 Log::warning('MercadoPagoPoint: 409 idempotency_key_already_used, reintentando con nueva key', [
                     'external_reference' => $externalReference,
@@ -374,7 +374,7 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
 
                 // Reintentar con nueva X-Idempotency-Key
                 if (self::AUTO_CANCEL_RETRY_ONCE) {
-                    $newIdempotencyKey = $this->generateIdempotencyKey($paymentTicket->id, true);
+                    $newIdempotencyKey = $this->generateIdempotencyKey();
 
                     Log::info('MercadoPagoPoint: Reintentando tras 409 en sendToTerminal', [
                         'external_reference' => $externalReference,
@@ -440,10 +440,9 @@ class MercadoPagoPointHandler extends PaymentProviderHandler
     /**
      * Generar X-Idempotency-Key único para cada transacción
      */
-    private function generateIdempotencyKey(int $paymentTicketId, bool $isRetry = false): string
+    private function generateIdempotencyKey(): string
     {
-        $suffix = $isRetry ? '-retry' : '';
-        return "CINEA-{$paymentTicketId}{$suffix}-" . Str::random(16);
+        return Str::uuid()->toString();
     }
 
     /**
