@@ -83,7 +83,7 @@ class ProductController extends Controller
 
     private function validateProduct(Request $request): array
     {
-        return $request->validate([
+        $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'price' => ['required', 'numeric', 'min:0.01'],
             'sku' => ['nullable', 'string', 'max:255'],
@@ -99,10 +99,49 @@ class ProductController extends Controller
             'variants.*.id' => ['nullable', 'string', 'max:255'],
             'variants.*.color' => ['nullable', 'string', 'max:255'],
             'variants.*.size' => ['nullable', 'string', 'max:255'],
+            'variants.*.sizes' => ['nullable', 'array'],
+            'variants.*.sizes.*' => ['string', 'max:255'],
             'variants.*.stock' => ['nullable', 'integer', 'min:0'],
             'images' => ['nullable', 'array'],
             'images.*.id' => ['nullable', 'string', 'max:255'],
             'images.*.url' => ['required_with:images', 'string', 'max:2048'],
         ]);
+
+        $data['variants'] = $this->expandVariants($data['variants'] ?? []);
+
+        return $data;
+    }
+
+    private function expandVariants(array $variants): array
+    {
+        $expanded = [];
+
+        foreach ($variants as $variant) {
+            $sizes = array_values(array_filter(
+                $variant['sizes'] ?? [],
+                fn ($size) => trim((string) $size) !== ''
+            ));
+
+            if ($sizes === []) {
+                $expanded[] = [
+                    'id' => $variant['id'] ?? null,
+                    'color' => $variant['color'] ?? null,
+                    'size' => $variant['size'] ?? null,
+                    'stock' => (int) ($variant['stock'] ?? 0),
+                ];
+
+                continue;
+            }
+
+            foreach (array_unique($sizes) as $size) {
+                $expanded[] = [
+                    'color' => $variant['color'] ?? null,
+                    'size' => trim((string) $size),
+                    'stock' => (int) ($variant['stock'] ?? 0),
+                ];
+            }
+        }
+
+        return $expanded;
     }
 }
