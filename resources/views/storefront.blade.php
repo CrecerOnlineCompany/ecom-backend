@@ -8,6 +8,14 @@
         <script>
             window.__STORE_KEY__ = @json(request()->route('store'));
             window.__AIMEOS_JSONAPI__ = @json(url('/jsonapi'));
+            window.__STOREFRONT_CONTACTS__ = @json([
+                'whatsapp' => env('STOREFRONT_WHATSAPP'),
+                'whatsappMessage' => env('STOREFRONT_WHATSAPP_MESSAGE', 'Hola, quiero consultar por un producto.'),
+                'instagram' => env('STOREFRONT_INSTAGRAM_URL'),
+                'facebook' => env('STOREFRONT_FACEBOOK_URL'),
+                'tiktok' => env('STOREFRONT_TIKTOK_URL'),
+                'youtube' => env('STOREFRONT_YOUTUBE_URL'),
+            ]);
         </script>
         @vite(['resources/css/app.css', 'resources/js/storefront.js'])
     </head>
