@@ -173,17 +173,17 @@
         </section>
 
         <div class="fixed bottom-24 right-4 z-40 grid gap-2 sm:bottom-6 sm:right-6">
-            <a v-if="contacts.instagram" :href="contacts.instagram" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-pink-600 shadow-lg" aria-label="Instagram"><Instagram :size="21" /></a>
-            <a v-if="contacts.facebook" :href="contacts.facebook" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-blue-600 shadow-lg" aria-label="Facebook"><Facebook :size="21" /></a>
+            <a v-if="contacts.instagram" :href="contacts.instagram" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-xs font-black text-pink-600 shadow-lg" aria-label="Instagram">IG</a>
+            <a v-if="contacts.facebook" :href="contacts.facebook" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-xs font-black text-blue-600 shadow-lg" aria-label="Facebook">FB</a>
             <a v-if="contacts.tiktok" :href="contacts.tiktok" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-xs font-black text-slate-950 shadow-lg" aria-label="TikTok">TT</a>
-            <a v-if="contacts.youtube" :href="contacts.youtube" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-red-600 shadow-lg" aria-label="YouTube"><Youtube :size="22" /></a>
+            <a v-if="contacts.youtube" :href="contacts.youtube" target="_blank" rel="noopener" class="grid h-11 w-11 place-items-center rounded-full bg-white text-xs font-black text-red-600 shadow-lg" aria-label="YouTube">YT</a>
             <a v-if="contacts.whatsapp" :href="whatsappUrl" target="_blank" rel="noopener" class="mt-2 grid h-14 w-14 place-items-center rounded-full bg-emerald-500 text-white shadow-xl" aria-label="WhatsApp"><MessageCircle :size="28" /></a>
         </div>
     </main>
 </template>
 
 <script setup>
-import { ArrowLeft, Check, Facebook, Heart, Instagram, Menu, MessageCircle, Search, ShoppingBag, User, Youtube } from '@lucide/vue';
+import { ArrowLeft, Check, Heart, Menu, MessageCircle, Search, ShoppingBag, User } from '@lucide/vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 
 const storeKey = window.__STORE_KEY__ || 'demo';
