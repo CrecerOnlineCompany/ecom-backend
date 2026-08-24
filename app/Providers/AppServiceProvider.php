@@ -2,14 +2,10 @@
 
 namespace App\Providers;
 
-use Illuminate\Support\ServiceProvider;
-use App\Services\PaymentProviders\PaymentProviderManager;
-use App\Services\ScreeningImportExportService;
-use App\Services\ManualOrderService;
-use App\Services\OrderNumberGenerator;
-use App\Services\OrderItemPricingService;
-use App\Services\SeatInventoryService;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\URL;
+use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -18,24 +14,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        // Registrar Manual Order Service con sus dependencias
-        $this->app->singleton(ManualOrderService::class, function ($app) {
-            return new ManualOrderService(
-                $app->make(OrderNumberGenerator::class),
-                $app->make(SeatInventoryService::class),
-                $app->make(OrderItemPricingService::class)
-            );
-        });
-
-        // Registrar Payment Provider Manager como singleton
-        $this->app->singleton(PaymentProviderManager::class, function ($app) {
-            return new PaymentProviderManager();
-        });
-
-        // Registrar Screening Import/Export Service
-        $this->app->singleton(ScreeningImportExportService::class, function ($app) {
-            return new ScreeningImportExportService();
-        });
+        //
     }
 
     /**
@@ -43,9 +22,27 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        if (
+            !class_exists('\Aimeos\Admin\JQAdm\Site\Standard', false)
+            && class_exists('\Aimeos\Admin\JQAdm\Locale\Site\Standard')
+        ) {
+            class_alias('\Aimeos\Admin\JQAdm\Locale\Site\Standard', '\Aimeos\Admin\JQAdm\Site\Standard');
+        }
+
+        Carbon::setLocale('es');
+        setlocale(LC_TIME, 'es_AR.UTF-8', 'es_AR', 'es_ES.UTF-8', 'es_ES', 'Spanish');
+
         // Forzar HTTPS en producción
         if ($this->app->environment('production')) {
             URL::forceScheme('https');
         }
+
+        Gate::define('admin', function ($user, $class = null, $roles = []) {
+            if (isset($user->superuser) && $user->superuser) {
+                return true;
+            }
+
+            return app('\Aimeos\Shop\Base\Support')->checkUserGroup($user, $roles);
+        });
     }
 }

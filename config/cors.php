@@ -19,11 +19,40 @@ return [
 
     'allowed_methods' => ['*'],
 
-    'allowed_origins' => [
-        'http://localhost:5173',
-        env('FRONTEND_URL', 'http://localhost:5174'),
-        env('APP_URL', 'http://localhost'),
-    ],
+    'allowed_origins' => (function () {
+        $normalize = function (?string $value): ?string {
+            $value = trim((string) $value);
+            if ($value === '') {
+                return null;
+            }
+
+            $parts = parse_url($value);
+            if (!is_array($parts)) {
+                return null;
+            }
+
+            $scheme = $parts['scheme'] ?? null;
+            $host = $parts['host'] ?? null;
+            if (!$scheme || !$host) {
+                return null;
+            }
+
+            $port = isset($parts['port']) ? ':' . $parts['port'] : '';
+            return strtolower($scheme) . '://' . $host . $port;
+        };
+
+        $origins = [
+            'http://localhost:5173',
+            'http://127.0.0.1:5173',
+            'http://localhost:5174',
+            'http://127.0.0.1:5174',
+            $normalize(env('FRONTEND_URL')),
+            $normalize(env('ECOM_FRONTEND_URL')),
+            $normalize(env('APP_URL', 'http://localhost')),
+        ];
+
+        return array_values(array_unique(array_filter($origins)));
+    })(),
 
     'allowed_origins_patterns' => [],
 

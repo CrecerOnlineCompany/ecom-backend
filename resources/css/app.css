@@ -1,0 +1,115 @@
+@import "tailwindcss";
+
+html,
+body,
+#manage-app {
+    min-height: 100%;
+}
+
+body {
+    margin: 0;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #1f2933;
+    background: #f4f6f8;
+}
+
+.landing {
+    display: grid;
+    place-content: center;
+    gap: 18px;
+    min-height: 100vh;
+    padding: 24px;
+    text-align: center;
+}
+
+.landing h1 {
+    margin: 0;
+    font-size: 32px;
+    letter-spacing: 0;
+}
+
+.landing nav {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+}
+
+.landing a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+    padding: 0 14px;
+    border: 1px solid #d9e2ec;
+    border-radius: 6px;
+    background: #fff;
+    color: #243b53;
+    text-decoration: none;
+}
+
+.auth-page {
+    display: grid;
+    place-items: center;
+    min-height: 100vh;
+    padding: 24px;
+}
+
+.auth-card {
+    display: grid;
+    gap: 14px;
+    width: min(100%, 380px);
+    padding: 24px;
+    border: 1px solid #d9e2ec;
+    border-radius: 8px;
+    background: #fff;
+}
+
+.auth-card h1 {
+    margin: 0;
+    font-size: 26px;
+    letter-spacing: 0;
+}
+
+.auth-card p {
+    margin: 6px 0 0;
+    color: #52606d;
+}
+
+.auth-card label {
+    display: grid;
+    gap: 6px;
+    color: #243b53;
+    font-size: 14px;
+}
+
+.auth-card input {
+    min-height: 40px;
+    border: 1px solid #d9e2ec;
+    border-radius: 6px;
+    padding: 0 12px;
+    font: inherit;
+}
+
+.auth-card .check-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.auth-card .check-row input {
+    min-height: auto;
+}
+
+.auth-error {
+    color: #c92a2a;
+}
+
+.auth-card button {
+    min-height: 42px;
+    border: 0;
+    border-radius: 6px;
+    background: #2f80ed;
+    color: #fff;
+    font: inherit;
+    cursor: pointer;
+}

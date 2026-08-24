@@ -46,8 +46,8 @@ return [
 
         'admin' => [
             'driver' => 'local',
-            'root' => public_path('images/movies'),
-            'url' => env('APP_URL').'/images/movies',
+            'root' => public_path('images/catalog'),
+            'url' => env('APP_URL').'/images/catalog',
             'visibility' => 'public',
             'throw' => false,
         ],

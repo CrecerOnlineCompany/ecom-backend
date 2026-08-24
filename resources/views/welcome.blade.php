@@ -1,16 +1,18 @@
-<!DOCTYPE html>
-<html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <link rel="icon" href="/favicon.ico">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CINEA - Venta de Entradas</title>
-  <script type="module" crossorigin src="/assets/index-ee10ef7b.js"></script>
-  <link rel="modulepreload" crossorigin href="/assets/vendor-8f3c8a00.js">
-  <link rel="stylesheet" href="/assets/index-46e97115.css">
-</head>
-<body>
-    <div id="app"></div>
-    
-</body>
+<!doctype html>
+<html lang="{{ str_replace('_', '-', app()->getLocale()) }}">
+    <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>{{ config('app.name', 'Ecom') }}</title>
+        @vite(['resources/css/app.css', 'resources/js/app.js'])
+    </head>
+    <body>
+        <main class="landing">
+            <h1>{{ config('app.name', 'Ecom') }}</h1>
+            <nav>
+                <a href="/t/demo">Frontend tienda demo</a>
+                <a href="/admin">Admin custom</a>
+            </nav>
+        </main>
+    </body>
 </html>
