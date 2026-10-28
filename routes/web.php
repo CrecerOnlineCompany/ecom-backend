@@ -25,9 +25,7 @@ Route::get('install', function() {
 });
 */
 
-Route::get('/', function () {
-    return view('welcome');
-});
+Route::redirect('/', '/admin');
 
 Route::middleware('guest')->group(function () {
     Route::get('/login', [WebLoginController::class, 'create'])->name('login');
@@ -74,6 +72,4 @@ Route::view('/admin/{any?}', 'manage')
     ->name('admin.manage');
 
 // Aimeos registra /shop y /admin desde el paquete.
-Route::get('{any}', function () {
-    return view('welcome');
-})->where('any', '^(?!admin|aimeos-admin|shop|jsonapi|graphql|api|auth|manage|login|logout|t).*')->name('catch-all');
+Route::redirect('{any}', '/admin')->where('any', '^(?!admin|aimeos-admin|shop|jsonapi|graphql|api|auth|manage|login|logout|t).*')->name('catch-all');
