@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Manage;
 
 use App\Http\Controllers\Controller;
 use App\Models\ShopSetting;
+use App\Services\Shop\ManagedSite;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
@@ -11,7 +12,6 @@ class ShopSettingController extends Controller
 {
     private const DEFAULTS = [
         'commercial_name' => 'Default',
-        'site_code' => 'default',
         'contact_email' => 'admin@test.com',
         'country' => 'US',
         'primary_currency' => 'USD',
@@ -19,6 +19,10 @@ class ShopSettingController extends Controller
         'primary_language' => 'es',
         'timezone' => 'America/Argentina/Buenos_Aires',
     ];
+
+    public function __construct(private readonly ManagedSite $site)
+    {
+    }
 
     public function show(): JsonResponse
     {
@@ -31,7 +35,6 @@ class ShopSettingController extends Controller
     {
         $data = $request->validate([
             'commercial_name' => ['required', 'string', 'max:255'],
-            'site_code' => ['required', 'string', 'max:64'],
             'contact_email' => ['required', 'email', 'max:255'],
             'country' => ['required', 'string', 'max:2'],
             'primary_currency' => ['required', 'string', 'max:3'],
@@ -41,7 +44,10 @@ class ShopSettingController extends Controller
         ]);
 
         foreach ($data as $key => $value) {
-            ShopSetting::query()->updateOrCreate(['key' => $key], ['value' => $value]);
+            ShopSetting::query()->updateOrCreate(
+                ['site_code' => $this->site->code(), 'key' => $key],
+                ['value' => $value]
+            );
         }
 
         return response()->json([
@@ -52,8 +58,12 @@ class ShopSettingController extends Controller
 
     private function settings(): array
     {
-        $stored = ShopSetting::query()->pluck('value', 'key')->all();
+        $stored = ShopSetting::query()
+            ->where('site_code', $this->site->code())
+            ->pluck('value', 'key')
+            ->all();
 
-        return array_replace(self::DEFAULTS, $stored);
+        // The store code is the tenant identity, so it is always reported but never editable here.
+        return array_replace(self::DEFAULTS, $stored, ['site_code' => $this->site->code()]);
     }
 }

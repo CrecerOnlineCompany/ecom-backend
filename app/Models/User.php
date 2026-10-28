@@ -12,6 +12,16 @@ class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable;
 
+    public const ROLE_SUPERADMIN = 'Superadmin';
+    public const ROLE_ADMIN = 'Admin';
+    public const ROLE_EDITOR = 'Editor';
+    public const ROLE_CUSTOMER = 'Cliente';
+
+    /**
+     * Roles allowed to sign in to the admin panel.
+     */
+    public const MANAGE_ROLES = [self::ROLE_SUPERADMIN, self::ROLE_ADMIN, self::ROLE_EDITOR];
+
     /**
      * The attributes that are mass assignable.
      *
@@ -22,6 +32,7 @@ class User extends Authenticatable
         'email',
         'password',
         'siteid',
+        'site_code',
         'superuser',
         'role',
         'status',
@@ -48,4 +59,14 @@ class User extends Authenticatable
         'superuser' => 'boolean',
         'status' => 'integer',
     ];
+
+    public function isSuperadmin(): bool
+    {
+        return $this->role === self::ROLE_SUPERADMIN;
+    }
+
+    public function canManage(): bool
+    {
+        return in_array($this->role, self::MANAGE_ROLES, true) && (int) $this->status !== 0;
+    }
 }

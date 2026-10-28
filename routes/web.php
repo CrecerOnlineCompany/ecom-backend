@@ -6,7 +6,9 @@ use App\Http\Controllers\Manage\OrderController as ManageOrderController;
 use App\Http\Controllers\Manage\PaymentMethodController as ManagePaymentMethodController;
 use App\Http\Controllers\Manage\ProductImageUploadController;
 use App\Http\Controllers\Manage\ProductController as ManageProductController;
+use App\Http\Controllers\Manage\SessionController as ManageSessionController;
 use App\Http\Controllers\Manage\ShopSettingController as ManageShopSettingController;
+use App\Http\Controllers\Manage\SiteController as ManageSiteController;
 use App\Http\Controllers\Manage\UserController as ManageUserController;
 use Illuminate\Support\Facades\Route;
 
@@ -44,10 +46,11 @@ Route::view('/t/{store}/{any?}', 'storefront')
     ->name('storefront');
 
 Route::post('/admin/uploads/product-images', [ProductImageUploadController::class, 'store'])
-    ->middleware('auth')
+    ->middleware(['auth', 'manage'])
     ->name('admin.product-images.store');
 
-Route::middleware('auth')->prefix('admin/api')->name('admin.api.')->group(function () {
+Route::middleware(['auth', 'manage'])->prefix('admin/api')->name('admin.api.')->group(function () {
+    Route::get('/session', [ManageSessionController::class, 'show'])->name('session.show');
     Route::get('/products', [ManageProductController::class, 'index'])->name('products.index');
     Route::post('/products', [ManageProductController::class, 'store'])->name('products.store');
     Route::get('/products/{product}', [ManageProductController::class, 'show'])->name('products.show');
@@ -61,13 +64,23 @@ Route::middleware('auth')->prefix('admin/api')->name('admin.api.')->group(functi
     Route::get('/payments', [ManagePaymentMethodController::class, 'index'])->name('payments.index');
     Route::post('/payments', [ManagePaymentMethodController::class, 'store'])->name('payments.store');
     Route::put('/payments/{payment}', [ManagePaymentMethodController::class, 'update'])->name('payments.update');
-    Route::get('/users', [ManageUserController::class, 'index'])->name('users.index');
-    Route::post('/users', [ManageUserController::class, 'store'])->name('users.store');
-    Route::put('/users/{user}', [ManageUserController::class, 'update'])->name('users.update');
+
+    Route::middleware('manage:admin')->group(function () {
+        Route::get('/users', [ManageUserController::class, 'index'])->name('users.index');
+        Route::post('/users', [ManageUserController::class, 'store'])->name('users.store');
+        Route::put('/users/{user}', [ManageUserController::class, 'update'])->name('users.update');
+    });
+
+    Route::middleware('manage:superadmin')->group(function () {
+        Route::put('/session/site', [ManageSessionController::class, 'switchSite'])->name('session.site');
+        Route::get('/sites', [ManageSiteController::class, 'index'])->name('sites.index');
+        Route::post('/sites', [ManageSiteController::class, 'store'])->name('sites.store');
+        Route::put('/sites/{site}', [ManageSiteController::class, 'update'])->name('sites.update');
+    });
 });
 
 Route::view('/admin/{any?}', 'manage')
-    ->middleware('auth')
+    ->middleware(['auth', 'manage'])
     ->where('any', '.*')
     ->name('admin.manage');
 

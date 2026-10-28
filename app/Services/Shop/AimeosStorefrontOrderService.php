@@ -5,7 +5,6 @@ namespace App\Services\Shop;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
-use Throwable;
 
 class AimeosStorefrontOrderService
 {
@@ -147,13 +146,14 @@ class AimeosStorefrontOrderService
 
     private function siteId(string $store): string
     {
-        try {
-            $code = $store === 'demo' ? 'default' : $store;
-            $siteId = DB::table('mshop_locale_site')->where('code', $code)->value('siteid');
+        $code = $store === 'demo' ? 'default' : $store;
+        $siteId = DB::table('mshop_locale_site')->where('code', $code)->value('siteid');
 
-            return $siteId ?: '1.';
-        } catch (Throwable) {
-            return '1.';
+        // Never fall back to another store: the order would end up in a different client's panel.
+        if (!$siteId) {
+            throw new RuntimeException('La tienda no existe.');
         }
+
+        return $siteId;
     }
 }
