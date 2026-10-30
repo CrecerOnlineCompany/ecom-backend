@@ -13,40 +13,6 @@ body {
     background: #f4f6f8;
 }
 
-.landing {
-    display: grid;
-    place-content: center;
-    gap: 18px;
-    min-height: 100vh;
-    padding: 24px;
-    text-align: center;
-}
-
-.landing h1 {
-    margin: 0;
-    font-size: 32px;
-    letter-spacing: 0;
-}
-
-.landing nav {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 10px;
-}
-
-.landing a {
-    display: inline-flex;
-    align-items: center;
-    min-height: 40px;
-    padding: 0 14px;
-    border: 1px solid #d9e2ec;
-    border-radius: 6px;
-    background: #fff;
-    color: #243b53;
-    text-decoration: none;
-}
-
 .auth-page {
     display: grid;
     place-items: center;

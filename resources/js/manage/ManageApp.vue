@@ -9,6 +9,14 @@
                 </div>
             </div>
 
+            <div class="border-b border-slate-200 px-4 py-3">
+                <store-switcher
+                    :session="session"
+                    :switching="siteSwitching"
+                    @change="switchSite"
+                />
+            </div>
+
             <nav class="flex-1 space-y-1 px-3 py-4" aria-label="Admin">
                 <button
                     v-for="item in navItems"
@@ -25,6 +33,13 @@
             <div class="border-t border-slate-200 p-4">
                 <p class="truncate text-sm font-medium text-slate-900">{{ userLabel }}</p>
                 <p class="mt-1 text-xs text-slate-500">{{ sessionLabel }}</p>
+                <form method="POST" action="/logout" class="mt-3">
+                    <input type="hidden" name="_token" :value="csrfToken">
+                    <button type="submit" :class="[ui.secondaryButton, 'w-full']">
+                        <LogOut :size="17" />
+                        <span>Cerrar sesion</span>
+                    </button>
+                </form>
             </div>
         </aside>
 
@@ -44,7 +59,21 @@
                             <Plus :size="18" />
                             <span>{{ activeItem.action }}</span>
                         </button>
+                        <form method="POST" action="/logout" class="lg:hidden">
+                            <input type="hidden" name="_token" :value="csrfToken">
+                            <button type="submit" :class="ui.iconButton" title="Cerrar sesion">
+                                <LogOut :size="18" />
+                            </button>
+                        </form>
                     </div>
+                </div>
+
+                <div class="mt-3 lg:hidden">
+                    <store-switcher
+                        :session="session"
+                        :switching="siteSwitching"
+                        @change="switchSite"
+                    />
                 </div>
 
                 <div class="mt-3 flex gap-2 overflow-x-auto lg:hidden">
@@ -393,6 +422,129 @@
                     <settings-panel title="Monedas" :fields="currencyFields" :saving="settingsSaving" @update="updateSetting" @save="saveSettings" />
                 </section>
 
+                <section v-else-if="activeSection === 'sites'" class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+                    <article :class="ui.card">
+                        <div class="border-b border-slate-200 px-4 py-4 sm:px-5">
+                            <h2 class="text-base font-semibold">Clientes</h2>
+                            <p class="mt-1 text-sm text-slate-500">Cada cliente tiene su propia tienda, catalogo, ordenes, configuracion y usuarios.</p>
+                        </div>
+
+                        <div class="grid gap-3 p-3 md:hidden">
+                            <p v-if="sitesLoading" class="rounded-md border border-slate-200 bg-white p-4 text-sm text-slate-500">Cargando clientes...</p>
+                            <article v-for="site in sites" :key="site.id" :class="ui.mobileRow">
+                                <div class="flex items-start justify-between gap-3">
+                                    <div>
+                                        <h3 class="font-medium text-slate-950">{{ site.name }}</h3>
+                                        <p class="mt-1 text-sm text-slate-500">{{ site.meta }} · {{ site.admins }} usuarios</p>
+                                    </div>
+                                    <status-pill :value="site.status" />
+                                </div>
+                                <div class="flex flex-wrap gap-2">
+                                    <button type="button" :class="ui.secondaryButton" :disabled="site.id === session?.site?.code" @click="switchSite(site.id)">
+                                        <Store :size="17" />
+                                        <span>{{ site.id === session?.site?.code ? 'Administrando' : 'Administrar' }}</span>
+                                    </button>
+                                    <a :href="site.storefront" target="_blank" rel="noopener" :class="ui.secondaryButton">
+                                        <ExternalLink :size="17" />
+                                        <span>Tienda</span>
+                                    </a>
+                                    <button type="button" :class="ui.secondaryButton" @click="editSite(site)">
+                                        <Pencil :size="17" />
+                                        <span>Editar</span>
+                                    </button>
+                                </div>
+                            </article>
+                        </div>
+
+                        <div class="hidden overflow-x-auto md:block">
+                            <table class="w-full text-left text-sm">
+                                <thead :class="ui.thead">
+                                    <tr>
+                                        <th :class="ui.th">Cliente</th>
+                                        <th :class="ui.th">Codigo</th>
+                                        <th :class="ui.th">Usuarios</th>
+                                        <th :class="ui.th">Estado</th>
+                                        <th :class="[ui.th, 'text-right']">Acciones</th>
+                                    </tr>
+                                </thead>
+                                <tbody :class="ui.tbody">
+                                    <tr v-if="sitesLoading">
+                                        <td :class="ui.td" colspan="5">Cargando clientes...</td>
+                                    </tr>
+                                    <tr v-for="site in sites" :key="site.id" class="hover:bg-slate-50">
+                                        <td :class="ui.td">
+                                            <div class="font-medium text-slate-950">{{ site.name }}</div>
+                                            <div v-if="site.id === session?.site?.code" class="text-xs font-medium text-emerald-700">Administrando ahora</div>
+                                        </td>
+                                        <td :class="ui.td">{{ site.meta }}</td>
+                                        <td :class="ui.td">{{ site.admins }}</td>
+                                        <td :class="ui.td"><status-pill :value="site.status" /></td>
+                                        <td :class="[ui.td, 'text-right']">
+                                            <div class="inline-flex gap-2">
+                                                <button type="button" :class="ui.iconButton" title="Administrar esta tienda" :disabled="site.id === session?.site?.code" @click="switchSite(site.id)">
+                                                    <Store :size="17" />
+                                                </button>
+                                                <a :href="site.storefront" target="_blank" rel="noopener" :class="ui.iconButton" title="Ver tienda publica">
+                                                    <ExternalLink :size="17" />
+                                                </a>
+                                                <button type="button" :class="ui.iconButton" title="Editar" @click="editSite(site)">
+                                                    <Pencil :size="17" />
+                                                </button>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </article>
+
+                    <article :class="[ui.card, 'p-4 sm:p-5']">
+                        <h2 class="text-base font-semibold">Nuevo cliente</h2>
+                        <p class="mt-1 text-sm text-slate-500">Crea la tienda y el usuario administrador del cliente.</p>
+                        <form class="mt-4 grid gap-4" @submit.prevent="createSite">
+                            <label :class="ui.label">
+                                Nombre del cliente *
+                                <input id="site-name" v-model="siteDraft.name" name="site_name" required :class="ui.input" @input="syncSiteCode">
+                            </label>
+                            <label :class="ui.label">
+                                Codigo de tienda *
+                                <input v-model="siteDraft.code" name="site_code" required pattern="[a-z0-9]+(-[a-z0-9]+)*" :class="ui.input" @input="siteCodeTouched = true">
+                                <small class="font-normal text-slate-500">Se usa en la URL publica: /t/{{ siteDraft.code || 'codigo' }}</small>
+                            </label>
+                            <div class="grid grid-cols-2 gap-3">
+                                <label :class="ui.label">
+                                    Moneda *
+                                    <input v-model="siteDraft.currency" name="site_currency" required maxlength="3" :class="ui.input">
+                                </label>
+                                <label :class="ui.label">
+                                    Idioma *
+                                    <input v-model="siteDraft.language" name="site_language" required maxlength="5" :class="ui.input">
+                                </label>
+                            </div>
+                            <h3 class="pt-2 text-sm font-semibold text-slate-900">Administrador del cliente</h3>
+                            <label :class="ui.label">
+                                Nombre *
+                                <input v-model="siteDraft.admin_name" name="site_admin_name" required :class="ui.input">
+                            </label>
+                            <label :class="ui.label">
+                                Email *
+                                <input v-model="siteDraft.admin_email" name="site_admin_email" type="email" required autocomplete="off" :class="ui.input">
+                            </label>
+                            <label :class="ui.label">
+                                Contraseña * (minimo 8)
+                                <input v-model="siteDraft.admin_password" name="site_admin_password" type="password" required minlength="8" autocomplete="new-password" :class="ui.input">
+                            </label>
+                            <div v-if="Object.keys(siteErrors).length" class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                                <p v-for="error in siteErrors" :key="error">{{ error }}</p>
+                            </div>
+                            <button type="submit" :class="ui.primaryButton" :disabled="siteSaving">
+                                <Plus :size="18" />
+                                <span>{{ siteSaving ? 'Creando...' : 'Crear cliente' }}</span>
+                            </button>
+                        </form>
+                    </article>
+                </section>
+
                 <section v-else-if="resourceModule" class="space-y-4">
                     <article :class="ui.card">
                         <module-toolbar
@@ -568,11 +720,14 @@ import {
     ArrowLeft,
     Banknote,
     Boxes,
+    Building2,
     CreditCard,
+    ExternalLink,
     Eye,
     FolderTree,
     LayoutDashboard,
     LogIn,
+    LogOut,
     Package,
     Pencil,
     Plus,
@@ -717,6 +872,44 @@ const ModuleToolbar = defineComponent({
     },
 });
 
+const StoreSwitcher = defineComponent({
+    props: {
+        session: { type: Object, default: null },
+        switching: { type: Boolean, default: false },
+    },
+    emits: ['change'],
+    setup(props, { emit }) {
+        return () => {
+            const site = props.session?.site;
+
+            if (!site) {
+                return h('p', { class: 'text-xs text-slate-500' }, 'Cargando tienda...');
+            }
+
+            const current = props.session.isSuperadmin
+                ? h('select', {
+                    class: ui.input,
+                    name: 'managed_site',
+                    value: site.code,
+                    disabled: props.switching,
+                    onChange: (event) => emit('change', event.target.value),
+                }, props.session.sites.map((option) => h('option', { key: option.code, value: option.code }, `${option.name} (${option.code})`)))
+                : h('strong', { class: 'block truncate text-sm font-semibold text-slate-900' }, site.name);
+
+            return h('div', { class: 'grid gap-1' }, [
+                h('span', { class: 'text-xs font-semibold uppercase tracking-wide text-slate-500' }, 'Tienda'),
+                current,
+                h('a', {
+                    class: 'inline-flex items-center gap-1 text-xs font-medium text-emerald-700 hover:text-emerald-800',
+                    href: site.storefront,
+                    target: '_blank',
+                    rel: 'noopener',
+                }, [h(ExternalLink, { size: 13 }), 'Ver tienda publica']),
+            ]);
+        };
+    },
+});
+
 const SettingsPanel = defineComponent({
     props: {
         title: { type: String, required: true },
@@ -750,6 +943,14 @@ const SettingsPanel = defineComponent({
 });
 
 const user = ref(window.__MANAGE_USER__ || null);
+const session = ref(null);
+const siteSwitching = ref(false);
+const sites = ref([]);
+const sitesLoading = ref(false);
+const siteSaving = ref(false);
+const siteErrors = ref({});
+const siteCodeTouched = ref(false);
+const siteDraft = reactive(newSiteDraft());
 const message = ref('');
 const previewItem = ref(null);
 const activeSection = ref('products');
@@ -845,7 +1046,7 @@ const pondServer = {
     },
 };
 
-const navItems = [
+const baseNavItems = [
     { key: 'products', label: 'Productos', title: 'Productos', action: 'Crear producto', icon: Package },
     { key: 'categories', label: 'Categorias', title: 'Categorias', action: 'Crear categoria', icon: FolderTree },
     { key: 'suppliers', label: 'Proveedores', title: 'Proveedores', action: 'Crear proveedor', icon: Truck },
@@ -856,6 +1057,12 @@ const navItems = [
     { key: 'users', label: 'Usuarios y roles', title: 'Usuarios y roles', action: 'Invitar usuario', icon: Users },
     { key: 'overview', label: 'Resumen', title: 'Panel operativo', action: 'Crear producto', icon: LayoutDashboard },
 ];
+const sitesNavItem = { key: 'sites', label: 'Clientes', title: 'Clientes', action: 'Crear cliente', icon: Building2 };
+const navItems = computed(() => {
+    const items = baseNavItems.filter((item) => item.key !== 'users' || session.value?.user?.role !== 'Editor');
+
+    return session.value?.isSuperadmin ? [sitesNavItem, ...items] : items;
+});
 
 const productStatuses = ['Todos', 'Publicado', 'Borrador', 'Pausado'];
 const productSortOptions = [
@@ -963,7 +1170,6 @@ const resourceModules = {
 
 const storeFields = computed(() => [
     { key: 'commercial_name', label: 'Nombre comercial', value: shopSettings.commercial_name },
-    { key: 'site_code', label: 'Codigo de sitio', value: shopSettings.site_code },
     { key: 'contact_email', label: 'Email de contacto', value: shopSettings.contact_email },
     { key: 'country', label: 'Pais', value: shopSettings.country },
 ]);
@@ -995,7 +1201,7 @@ const activeItem = computed(() => {
         };
     }
 
-    return navItems.find((item) => item.key === activeSection.value) || navItems[0];
+    return navItems.value.find((item) => item.key === activeSection.value) || navItems.value[0];
 });
 const resourceModule = computed(() => resourceModules[activeSection.value] || null);
 const userLabel = computed(() => user.value ? `${user.value.name} · ${user.value.email}` : 'Sin sesion activa');
@@ -1081,6 +1287,10 @@ function openSection(key) {
     if (key === 'users') {
         loadUsers();
     }
+
+    if (key === 'sites') {
+        loadSites();
+    }
 }
 
 function isNavActive(key) {
@@ -1097,6 +1307,11 @@ function primaryAction() {
 }
 
 function createPrimary() {
+    if (activeSection.value === 'sites') {
+        document.getElementById('site-name')?.focus();
+        return;
+    }
+
     if (activeSection.value === 'store') {
         saveSettings();
         return;
@@ -1266,7 +1481,8 @@ async function saveUser(member = null) {
         return;
     }
 
-    const role = window.prompt('Rol: Superadmin, Admin o Editor', member?.role || 'Admin');
+    const roleOptions = session.value?.isSuperadmin ? 'Superadmin, Admin o Editor' : 'Admin o Editor';
+    const role = window.prompt(`Rol: ${roleOptions}`, member?.role || 'Admin');
 
     if (role === null) {
         return;
@@ -1283,7 +1499,6 @@ async function saveUser(member = null) {
                 email: email.trim(),
                 role: role.trim(),
                 status,
-                siteid: shopSettings.site_code || 'default',
             }),
         });
         const index = team.value.findIndex((user) => user.id === payload.data.id);
@@ -1601,7 +1816,11 @@ async function syncRouteFromPath() {
     }
 
     const section = path.replace(/^\/admin\/?/, '') || 'products';
-    activeSection.value = navItems.some((item) => item.key === section) ? section : 'products';
+    activeSection.value = navItems.value.some((item) => item.key === section) ? section : 'products';
+
+    if (activeSection.value === 'sites') {
+        loadSites();
+    }
 }
 
 function filterAndSortRows(rows, filters, searchableFields) {
@@ -1717,6 +1936,10 @@ async function saveSettings() {
 }
 
 async function loadUsers() {
+    if (session.value?.user?.role === 'Editor') {
+        return;
+    }
+
     userLoading.value = true;
 
     try {
@@ -1737,6 +1960,109 @@ async function loadProduct(sku) {
         return payload.data || existing || { name: sku, sku };
     } catch {
         return existing || { name: sku, sku };
+    }
+}
+
+async function loadSession() {
+    try {
+        const payload = await apiRequest('/admin/api/session');
+        session.value = payload.data || null;
+    } catch (error) {
+        message.value = normalizeApiErrors(error).api || 'No se pudo cargar la sesion.';
+    }
+}
+
+async function switchSite(code) {
+    if (!code || code === session.value?.site?.code || !confirmLeaveDirty()) {
+        return;
+    }
+
+    siteSwitching.value = true;
+
+    try {
+        await apiRequest('/admin/api/session/site', {
+            method: 'PUT',
+            body: JSON.stringify({ code }),
+        });
+        // Reload so every section is fetched again for the selected store.
+        window.removeEventListener('beforeunload', warnBeforeUnload);
+        window.location.href = '/admin';
+    } catch (error) {
+        message.value = normalizeApiErrors(error).api || 'No se pudo cambiar de tienda.';
+        siteSwitching.value = false;
+    }
+}
+
+function newSiteDraft() {
+    return {
+        name: '',
+        code: '',
+        currency: 'ARS',
+        language: 'es',
+        admin_name: '',
+        admin_email: '',
+        admin_password: '',
+    };
+}
+
+function syncSiteCode() {
+    if (!siteCodeTouched.value) {
+        siteDraft.code = slugPart(siteDraft.name).toLowerCase();
+    }
+}
+
+async function loadSites() {
+    sitesLoading.value = true;
+
+    try {
+        const payload = await apiRequest('/admin/api/sites');
+        sites.value = payload.data || [];
+    } catch (error) {
+        message.value = normalizeApiErrors(error).api || 'No se pudieron cargar los clientes.';
+    } finally {
+        sitesLoading.value = false;
+    }
+}
+
+async function createSite() {
+    siteSaving.value = true;
+    siteErrors.value = {};
+
+    try {
+        const payload = await apiRequest('/admin/api/sites', {
+            method: 'POST',
+            body: JSON.stringify({ ...siteDraft, currency: siteDraft.currency.toUpperCase() }),
+        });
+        sites.value = [...sites.value, payload.data].sort((a, b) => a.name.localeCompare(b.name));
+        session.value?.sites?.push({ code: payload.data.id, name: payload.data.name });
+        Object.assign(siteDraft, newSiteDraft());
+        siteCodeTouched.value = false;
+        message.value = `${payload.message || 'Cliente creado.'} Su administrador ya puede ingresar con el email y la contraseña cargados.`;
+    } catch (error) {
+        siteErrors.value = normalizeApiErrors(error);
+    } finally {
+        siteSaving.value = false;
+    }
+}
+
+async function editSite(site) {
+    const name = window.prompt('Nombre del cliente', site.name);
+
+    if (name === null) {
+        return;
+    }
+
+    const status = window.confirm('Aceptar para dejarlo Activo. Cancelar para Inactivo.') ? 'Activo' : 'Inactivo';
+
+    try {
+        const payload = await apiRequest(`/admin/api/sites/${encodeURIComponent(site.id)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ name: name.trim(), status }),
+        });
+        sites.value = sites.value.map((item) => (item.id === site.id ? payload.data : item));
+        message.value = payload.message || 'Cliente guardado.';
+    } catch (error) {
+        message.value = normalizeApiErrors(error).api || 'No se pudo guardar el cliente.';
     }
 }
 
@@ -1776,6 +2102,7 @@ function normalizeApiErrors(error) {
 }
 
 onMounted(async () => {
+    await loadSession();
     await loadProducts();
     await loadResourceRows('categories');
     await loadResourceRows('orders');

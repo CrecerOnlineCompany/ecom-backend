@@ -8,11 +8,11 @@ class AimeosCategoryCatalog
     {
     }
 
-    public function list(): array
+    public function list(string $site = 'default'): array
     {
         $categories = [];
 
-        foreach ($this->products->list() as $product) {
+        foreach ($this->products->list($site) as $product) {
             $name = trim($product['category'] ?? '') ?: 'General';
             $key = mb_strtolower($name);
 
@@ -33,12 +33,12 @@ class AimeosCategoryCatalog
         return array_values($categories);
     }
 
-    public function update(string $category, array $data): array
+    public function update(string $category, array $data, string $site = 'default'): array
     {
         $name = trim($data['name'] ?? $category) ?: $category;
         $updated = 0;
 
-        foreach ($this->products->list() as $product) {
+        foreach ($this->products->list($site) as $product) {
             if (mb_strtolower($product['category'] ?? 'General') !== mb_strtolower($category)) {
                 continue;
             }
@@ -46,7 +46,7 @@ class AimeosCategoryCatalog
             $this->products->save([
                 ...$product,
                 'category' => $name,
-            ], $product['sku']);
+            ], $product['sku'], $site);
             $updated++;
         }
 

@@ -6,16 +6,28 @@ use Illuminate\Support\Facades\DB;
 
 class AimeosOrderCatalog
 {
-    public function list(): array
+    public function __construct(private readonly AimeosSiteManager $sites)
     {
+    }
+
+    public function list(string $site = 'default'): array
+    {
+        $siteId = $this->sites->siteId($site);
+
+        if (!$siteId) {
+            return [];
+        }
+
         $addresses = DB::table('mshop_order_address')
             ->select(['parentid', 'email', 'firstname', 'lastname'])
+            ->where('siteid', $siteId)
             ->where('type', 'payment')
             ->get()
             ->keyBy('parentid');
 
         return DB::table('mshop_order')
             ->select(['id', 'invoiceno', 'customerid', 'statuspayment', 'statusdelivery', 'price', 'currencyid', 'ctime'])
+            ->where('siteid', $siteId)
             ->orderByDesc('ctime')
             ->orderByDesc('id')
             ->limit(500)

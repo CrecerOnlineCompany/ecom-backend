@@ -17,6 +17,8 @@ class ManageProductImageUploadTest extends TestCase
         $user = User::factory()->make([
             'id' => 1,
             'email' => 'admin@test.com',
+            'role' => User::ROLE_ADMIN,
+            'status' => 1,
         ]);
 
         $response = $this

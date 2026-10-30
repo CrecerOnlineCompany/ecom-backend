@@ -17,6 +17,9 @@ class DatabaseSeeder extends Seeder
         ], [
             'name' => 'Admin User',
             'password' => Hash::make('password'),
+            'role' => User::ROLE_SUPERADMIN,
+            'superuser' => true,
+            'site_code' => 'default',
         ]);
 
         User::query()->updateOrCreate([

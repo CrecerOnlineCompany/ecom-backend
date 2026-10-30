@@ -4,15 +4,21 @@ namespace App\Http\Controllers\Manage;
 
 use App\Http\Controllers\Controller;
 use App\Models\PaymentMethod;
+use App\Services\Shop\ManagedSite;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 
 class PaymentMethodController extends Controller
 {
+    public function __construct(private readonly ManagedSite $site)
+    {
+    }
+
     public function index(): JsonResponse
     {
         return response()->json([
             'data' => PaymentMethod::query()
+                ->where('site_code', $this->site->code())
                 ->orderBy('name')
                 ->get()
                 ->map(fn (PaymentMethod $method) => $this->present($method)),
@@ -21,7 +27,9 @@ class PaymentMethodController extends Controller
 
     public function store(Request $request): JsonResponse
     {
-        $method = PaymentMethod::query()->create($this->validatedData($request));
+        $method = PaymentMethod::query()->create(
+            $this->validatedData($request) + ['site_code' => $this->site->code()]
+        );
 
         return response()->json([
             'data' => $this->present($method),
@@ -31,6 +39,8 @@ class PaymentMethodController extends Controller
 
     public function update(Request $request, PaymentMethod $payment): JsonResponse
     {
+        abort_unless($payment->site_code === $this->site->code(), 404);
+
         $payment->update($this->validatedData($request));
 
         return response()->json([

@@ -4,27 +4,30 @@ namespace App\Http\Controllers\Manage;
 
 use App\Http\Controllers\Controller;
 use App\Services\Shop\AimeosProductCatalog;
+use App\Services\Shop\ManagedSite;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Throwable;
 
 class ProductController extends Controller
 {
-    public function __construct(private readonly AimeosProductCatalog $catalog)
-    {
+    public function __construct(
+        private readonly AimeosProductCatalog $catalog,
+        private readonly ManagedSite $site,
+    ) {
     }
 
     public function index(): JsonResponse
     {
         return response()->json([
-            'data' => $this->catalog->list(),
+            'data' => $this->catalog->list($this->site->code()),
         ]);
     }
 
     public function show(string $product): JsonResponse
     {
         return response()->json([
-            'data' => $this->catalog->get($product),
+            'data' => $this->catalog->get($product, $this->site->code()),
         ]);
     }
 
@@ -34,7 +37,7 @@ class ProductController extends Controller
 
         try {
             return response()->json([
-                'data' => $this->catalog->save($data),
+                'data' => $this->catalog->save($data, null, $this->site->code()),
                 'message' => 'Producto guardado.',
             ], 201);
         } catch (Throwable $exception) {
@@ -52,7 +55,7 @@ class ProductController extends Controller
 
         try {
             return response()->json([
-                'data' => $this->catalog->save($data, $product),
+                'data' => $this->catalog->save($data, $product, $this->site->code()),
                 'message' => 'Producto guardado.',
             ]);
         } catch (Throwable $exception) {
@@ -67,7 +70,7 @@ class ProductController extends Controller
     public function destroy(string $product): JsonResponse
     {
         try {
-            $this->catalog->delete($product);
+            $this->catalog->delete($product, $this->site->code());
 
             return response()->json([
                 'message' => 'Producto eliminado.',

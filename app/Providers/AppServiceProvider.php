@@ -2,6 +2,7 @@
 
 namespace App\Providers;
 
+use App\Services\Shop\ManagedSite;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\URL;
@@ -14,7 +15,7 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        $this->app->scoped(ManagedSite::class);
     }
 
     /**

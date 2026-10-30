@@ -4,20 +4,23 @@ namespace App\Http\Controllers\Manage;
 
 use App\Http\Controllers\Controller;
 use App\Services\Shop\AimeosCategoryCatalog;
+use App\Services\Shop\ManagedSite;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Throwable;
 
 class CategoryController extends Controller
 {
-    public function __construct(private readonly AimeosCategoryCatalog $catalog)
-    {
+    public function __construct(
+        private readonly AimeosCategoryCatalog $catalog,
+        private readonly ManagedSite $site,
+    ) {
     }
 
     public function index(): JsonResponse
     {
         return response()->json([
-            'data' => $this->catalog->list(),
+            'data' => $this->catalog->list($this->site->code()),
         ]);
     }
 
@@ -31,7 +34,7 @@ class CategoryController extends Controller
 
         try {
             return response()->json([
-                'data' => $this->catalog->update($category, $data),
+                'data' => $this->catalog->update($category, $data, $this->site->code()),
                 'message' => 'Categoria guardada.',
             ]);
         } catch (Throwable $exception) {

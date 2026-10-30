@@ -23,6 +23,7 @@ class AuthController extends Controller
             'name' => $validated['name'],
             'email' => $validated['email'],
             'password' => $validated['password'],
+            'role' => User::ROLE_CUSTOMER,
         ]);
 
         $token = $user->createToken('web')->plainTextToken;
